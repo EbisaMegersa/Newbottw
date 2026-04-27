@@ -33,16 +33,15 @@ export default function App() {
   useEffect(() => {
     // Check for Telegram WebApp
     const tg = window.Telegram?.WebApp;
-    if (tg) {
+    if (tg && tg.initDataUnsafe?.user) {
       tg.ready();
       tg.expand();
-      const user = tg.initDataUnsafe?.user;
-      if (user) {
-        setUsername(user.username || user.first_name || 'User');
-        const stored = localStorage.getItem(`etb_balance_${user.id}`);
-        if (stored) setBalance(parseFloat(stored));
-      }
+      const user = tg.initDataUnsafe.user;
+      setUsername(user.username || user.first_name || 'User');
+      const stored = localStorage.getItem(`etb_balance_${user.id}`);
+      if (stored) setBalance(parseFloat(stored));
     } else {
+      // Fallback for non-Telegram or guest mode
       const stored = localStorage.getItem('etb_balance_guest');
       if (stored) setBalance(parseFloat(stored));
     }
@@ -50,8 +49,13 @@ export default function App() {
 
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
-    const key = tg?.initDataUnsafe?.user?.id ? `etb_balance_${tg.initDataUnsafe.user.id}` : 'etb_balance_guest';
-    localStorage.setItem(key, balance.toString());
+    const userId = tg?.initDataUnsafe?.user?.id;
+    const key = userId ? `etb_balance_${userId}` : 'etb_balance_guest';
+    
+    // Only save if balance > 0 to avoid overwriting on initial load error
+    if (balance > 0) {
+      localStorage.setItem(key, balance.toString());
+    }
   }, [balance]);
 
   const handleTap = useCallback((e: React.PointerEvent) => {
@@ -92,7 +96,7 @@ export default function App() {
       {/* Header */}
       <header className="p-4 flex items-center justify-between bg-zinc-900/50 backdrop-blur-md border-b border-zinc-800">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-green-500 to-emerald-700 flex items-center justify-center border border-green-400/30">
+          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-700 flex items-center justify-center border border-blue-400/30">
             <User className="w-6 h-6 text-white" />
           </div>
           <div>
@@ -112,7 +116,7 @@ export default function App() {
       <main className="flex-1 flex flex-col items-center justify-center relative px-6 py-8">
         {/* Background Glow */}
         <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 bg-green-500/20 blur-[100px] rounded-full" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 bg-blue-500/20 blur-[100px] rounded-full" />
         </div>
 
         {/* Balance Display Large */}
@@ -138,17 +142,17 @@ export default function App() {
           onPointerDown={handleTap}
           className="relative w-64 h-64 cursor-pointer group active:scale-95 transition-transform duration-75 z-20"
         >
-          <div className="absolute inset-0 rounded-full bg-gradient-to-br from-green-400 via-emerald-600 to-green-900 p-1 coin-shadow shadow-green-500/20">
+          <div className="absolute inset-0 rounded-full bg-gradient-to-br from-blue-400 via-indigo-600 to-blue-900 p-1 coin-shadow shadow-blue-500/20">
             <div className="w-full h-full rounded-full bg-zinc-900 flex items-center justify-center relative overflow-hidden">
               <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />
               <div className="absolute top-0 w-full h-1/2 bg-gradient-to-b from-white/10 to-transparent pointer-events-none" />
-              <Rocket className="w-32 h-32 text-green-500 drop-shadow-[0_0_15px_rgba(34,197,94,0.5)] transition-transform group-active:scale-110" />
+              <Rocket className="w-32 h-32 text-blue-500 drop-shadow-[0_0_15px_rgba(59,130,246,0.5)] transition-transform group-active:scale-110" />
             </div>
           </div>
           
           {/* Animated rings */}
-          <div className="absolute inset-x-0 inset-y-0 rounded-full border-4 border-green-500/20 animate-ping opacity-20" style={{ animationDuration: '3s' }} />
-          <div className="absolute inset-x-0 inset-y-0 rounded-full border border-green-500/40 animate-pulse" />
+          <div className="absolute inset-x-0 inset-y-0 rounded-full border-4 border-blue-500/20 animate-ping opacity-20" style={{ animationDuration: '3s' }} />
+          <div className="absolute inset-x-0 inset-y-0 rounded-full border border-blue-500/40 animate-pulse" />
         </div>
 
         {/* Community Link */}
@@ -173,20 +177,20 @@ export default function App() {
       <div className="px-6 py-4 bg-zinc-900/30">
         <div className="flex justify-between items-end mb-2">
           <p className="text-xs font-bold text-zinc-400 uppercase tracking-tighter">Energy Level</p>
-          <p className="text-xs font-mono text-green-500">{Math.round(progress)}%</p>
+          <p className="text-xs font-mono text-blue-500">{Math.round(progress)}%</p>
         </div>
         <div className="h-3 w-full bg-zinc-800 rounded-full overflow-hidden border border-zinc-700">
           <motion.div 
             initial={{ width: 0 }}
             animate={{ width: `${progress}%` }}
-            className="h-full bg-gradient-to-r from-green-600 to-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.5)]"
+            className="h-full bg-gradient-to-r from-blue-600 to-cyan-400 shadow-[0_0_10px_rgba(59,130,246,0.5)]"
           />
         </div>
       </div>
 
       {/* Navigation */}
       <nav className="p-4 flex justify-around items-center bg-black border-t border-zinc-800 h-20">
-        <button className="flex flex-col items-center gap-1 text-green-500">
+        <button className="flex flex-col items-center gap-1 text-blue-500">
           <LayoutDashboard className="w-6 h-6" />
           <span className="text-[10px] font-bold uppercase">Tap</span>
         </button>
