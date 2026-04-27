@@ -16,43 +16,75 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      // Lookup the firebaseUid associated with the official Admin Telegram ID
+      return isSignedIn() && (
+        request.auth.uid == 'YV9L690no0avQkpuueRYOVzFNG92' || // Developer override
+        (exists(/databases/$(database)/documents/users/6758991323) &&
+         get(/databases/$(database)/documents/users/6758991323).data.get('firebaseUid', '') == request.auth.uid)
+      );
+    }
+
     function isValidUser(data) {
       return data.username is string && 
-             data.balance is number && 
-             data.referralCount is number &&
-             (!('withdrawn' in data) || data.withdrawn is number) &&
-             (!('adsWatched' in data) || data.adsWatched is number) &&
-             (!('completedTasks' in data) || data.completedTasks is list) &&
+             data.get('firebaseUid', '') is string &&
+             data.get('balance', 0) is number && 
+             data.get('referralCount', 0) is number &&
+             data.get('withdrawn', 0) is number &&
+             data.get('adsWatched', 0) is number &&
+             data.get('completedTasks', []) is list &&
              (!('referredBy' in data) || data.referredBy is string);
+    }
+
+    function isValidWithdrawal(data) {
+      return data.userId is string &&
+             data.firebaseUid is string &&
+             data.amount is number && data.amount >= 100 &&
+             data.method in ['telebirr', 'mpesa'] &&
+             data.address is string && data.address.size() == 10 &&
+             data.status in ['pending', 'approved', 'rejected'];
     }
 
     match /users/{userId} {
       allow get: if isSignedIn();
       
       allow create: if isSignedIn() && isValidUser(request.resource.data) &&
+                      request.resource.data.firebaseUid == request.auth.uid &&
                       request.resource.data.balance >= 0 &&
                       request.resource.data.withdrawn == 0 &&
                       request.resource.data.completedTasks.size() == 0 &&
                       request.resource.data.createdAt == request.time;
       
-      allow update: if isSignedIn() && isValidUser(request.resource.data) &&
+      allow update: if isSignedIn() && (
+                        isAdmin() || 
+                        resource.data.get('firebaseUid', '') == request.auth.uid ||
+                        // Migration path for users without firebaseUid yet or matching ID
+                        (!('firebaseUid' in resource.data) && (userId == request.auth.uid || isAdmin()))
+                      ) && 
+                      isValidUser(request.resource.data) &&
                       request.resource.data.updatedAt == request.time &&
                       (
-                        // Action: Task Progression / Sync / Tap
-                        (request.resource.data.balance >= resource.data.balance && 
-                         request.resource.data.diff(resource.data).affectedKeys().hasAny(['balance', 'updatedAt', 'username', 'completedTasks', 'adsWatched'])) ||
+                        isAdmin() ||
+                        // Action: Sync / Migration / Progression / Tap
+                        (request.resource.data.get('balance', 0) >= resource.data.get('balance', 0) && 
+                         request.resource.data.get('firebaseUid', '') == request.auth.uid &&
+                         request.resource.data.diff(resource.data).affectedKeys().hasAny(['balance', 'updatedAt', 'username', 'completedTasks', 'adsWatched', 'firebaseUid', 'referralCount', 'withdrawn'])) ||
                          
-                        // Action: Referral Reward
-                        (request.resource.data.balance == resource.data.balance + 50 &&
-                         request.resource.data.referralCount == resource.data.referralCount + 1 &&
-                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'referralCount', 'updatedAt'])) ||
-
-                        // Action: Withdrawal (Balance moves to withdrawn)
-                        (request.resource.data.balance < resource.data.balance &&
-                         request.resource.data.withdrawn > resource.data.withdrawn &&
-                         request.resource.data.balance + (request.resource.data.withdrawn - resource.data.withdrawn) == resource.data.balance + resource.data.withdrawn &&
-                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'withdrawn', 'updatedAt']))
+                        // Action: Referral Reward (Automated Awarding)
+                        (request.resource.data.get('balance', 0) == resource.data.get('balance', 0) + 50 &&
+                         request.resource.data.get('referralCount', 0) == resource.data.get('referralCount', 0) + 1 &&
+                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'referralCount', 'updatedAt']))
                       );
+    }
+
+    match /withdrawals/{withdrawalId} {
+      allow list: if isSignedIn() && (resource.data.get('firebaseUid', '') == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && (resource.data.get('firebaseUid', '') == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidWithdrawal(request.resource.data) &&
+                      request.resource.data.firebaseUid == request.auth.uid &&
+                      request.resource.data.status == 'pending' &&
+                      request.resource.data.createdAt == request.time;
+      allow update: if isAdmin();
     }
   }
 }
