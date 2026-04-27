@@ -1,0 +1,48 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Common helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidUser(data) {
+      return data.username is string && data.username.size() <= 100 &&
+             data.balance is number && data.balance >= 0 &&
+             data.referralCount is int &&
+             (data.referredBy == null || data.referredBy is string);
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) &&
+                      request.resource.data.balance == 0 &&
+                      request.resource.data.referralCount == 0 &&
+                      request.resource.data.createdAt == request.time;
+      
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) &&
+                      request.resource.data.createdAt == resource.data.createdAt &&
+                      request.resource.data.updatedAt == request.time &&
+                      // Prevent users from manually increasing balance by huge amounts or referral count
+                      (
+                        // Action: Tap (Small balance increase)
+                        (request.resource.data.balance <= resource.data.balance + 10 && 
+                         request.resource.data.referralCount == resource.data.referralCount &&
+                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'updatedAt'])) ||
+                        // Action: Update profile (username)
+                        (request.resource.data.balance == resource.data.balance &&
+                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['username', 'updatedAt']))
+                      );
+    }
+  }
+}
