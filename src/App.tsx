@@ -80,28 +80,35 @@ interface FloatingText {
 interface UserData {
   username: string;
   balance: number;
+  withdrawn: number;
+  adsWatched: number;
   referralCount: number;
+  completedTasks: string[];
   referredBy?: string;
   createdAt: any;
+  updatedAt: any;
 }
 
-type View = 'tap' | 'friends';
+type View = 'home' | 'tasks' | 'refer' | 'wallet' | 'profile';
 
 export default function App() {
   const [balance, setBalance] = useState<number>(0);
-  const [username, setUsername] = useState<string>('Guest');
+  const [withdrawn, setWithdrawn] = useState<number>(0);
+  const [adsWatched, setAdsWatched] = useState<number>(0);
+  const [username, setUsername] = useState<string>('Pilot');
   const [referralCount, setReferralCount] = useState<number>(0);
-  const [view, setView] = useState<View>('tap');
-  const [floatingTexts, setFloatingTexts] = useState<FloatingText[]>([]);
-  const [isCopied, setIsCopied] = useState(false);
+  const [completedTasks, setCompletedTasks] = useState<string[]>([]);
+  const [view, setView] = useState<View>('home');
   const [loading, setLoading] = useState(true);
   
-  const tapRef = useRef<HTMLDivElement>(null);
-  const incrementValue = 1;
-  const referralBonus = 50;
-
   const [notification, setNotification] = useState<string | null>(null);
-  const [isNewUserReferred, setIsNewUserReferred] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+
+  // Task & Withdrawal States
+  const [isJoinWaiting, setIsJoinWaiting] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  const [withdrawalPending, setWithdrawalPending] = useState(false);
+  const [withdrawalStatus, setWithdrawalStatus] = useState<'pending' | 'approved' | null>(null);
 
   // Telegram helper
   const tg = window.Telegram?.WebApp;
@@ -111,6 +118,7 @@ export default function App() {
       tg.ready();
       tg.expand();
       tg.enableClosingConfirmation();
+      tg.backgroundColor = '#000000';
     }
 
     let snapshotUnsubscribe: (() => void) | null = null;
@@ -123,39 +131,24 @@ export default function App() {
           
           await syncUser(firebaseUser.uid);
 
-          // Real-time listener for balance and referral updates
           const userDocRef = doc(db, 'users', canonicalId);
           snapshotUnsubscribe = onSnapshot(userDocRef, (snapshot) => {
             if (snapshot.exists()) {
-              const data = snapshot.data();
-              
-              setBalance((prev) => {
-                if (data.balance > prev && data.balance - prev === referralBonus) {
-                  setNotification("✨ Success! Someone joined using your link. +50 points have been added to your balance!");
-                  setTimeout(() => setNotification(null), 5000);
-                }
-                return data.balance;
-              });
-              
-              setReferralCount(data.referralCount);
+              const data = snapshot.data() as UserData;
+              setBalance(Number(data.balance) || 0);
+              setWithdrawn(Number(data.withdrawn) || 0);
+              setReferralCount(Number(data.referralCount) || 0);
+              setAdsWatched(Number(data.adsWatched) || 0);
+              setCompletedTasks(data.completedTasks || []);
             }
           }, (err) => {
-             console.error("Snapshot error:", err);
+            handleFirestoreError(err, OperationType.GET, `users/${canonicalId}`);
           });
-
         } else {
-          await signInAnonymously(auth).catch((err) => {
-            if (err.code === 'auth/admin-restricted-operation') {
-              console.warn("Anonymous auth restricted. Falling back to Local Mode.");
-              handleLocalModeSync();
-            } else {
-              throw err;
-            }
-          });
+          await signInAnonymously(auth).catch(console.error);
         }
-      } catch (error: any) {
-        console.error("Auth process error:", error);
-        setLoading(false);
+      } catch (error) {
+        console.error("Auth error:", error);
       }
     });
 
@@ -165,26 +158,9 @@ export default function App() {
     };
   }, []);
 
-  const handleLocalModeSync = () => {
-    const tgUser = tg?.initDataUnsafe?.user;
-    const userId = tgUser?.id || 'guest_pilot';
-    const stored = localStorage.getItem(`etb_local_data_${userId}`);
-    
-    if (stored) {
-      const data = JSON.parse(stored);
-      setBalance(data.balance || 0);
-      setReferralCount(data.referralCount || 0);
-    }
-    setUsername(tgUser?.username || tgUser?.first_name || 'Guest Pilot');
-    setLoading(false);
-  };
-
   const syncUser = async (uid: string) => {
     const tgUser = tg?.initDataUnsafe?.user;
-    // CRITICAL: We prioritize the Telegram ID as the document ID for stability and referrals
     const canonicalId = tgUser?.id?.toString() || uid;
-    const tgId = tgUser?.id?.toString() || 'unknown';
-    const path = `users/${canonicalId}`;
     
     try {
       const userDocRef = doc(db, 'users', canonicalId);
@@ -192,145 +168,162 @@ export default function App() {
       try {
         userDoc = await getDoc(userDocRef);
       } catch (err) {
-        handleFirestoreError(err, OperationType.GET, path);
+        handleFirestoreError(err, OperationType.GET, `users/${canonicalId}`);
         return;
       }
-      
-      const startParam = tg?.initDataUnsafe?.start_param; 
-      const currentUsername = tgUser?.username || tgUser?.first_name || 'Pilot';
+      const currentUsername = tgUser?.username || tgUser?.first_name || 'User';
       setUsername(currentUsername);
 
-      // Load local balance as a starting point/fallback
-      const localStored = localStorage.getItem(`etb_local_data_${tgId}`);
-      const localDataRaw = localStored ? JSON.parse(localStored) : { balance: 0, referralCount: 0 };
-      const localData = {
-        balance: Number(localDataRaw.balance) || 0,
-        referralCount: Number(localDataRaw.referralCount) || 0
-      };
-
       if (!userDoc.exists()) {
+        const startParam = tg?.initDataUnsafe?.start_param; 
         const userData: UserData = {
           username: currentUsername,
-          balance: localData.balance, 
-          referralCount: localData.referralCount,
+          balance: 0,
+          withdrawn: 0,
+          adsWatched: 0,
+          referralCount: 0,
+          completedTasks: [],
           createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
         };
 
-        // Important: startParam is the Canonical ID of the referrer
         if (startParam && startParam !== canonicalId) {
           userData.referredBy = startParam;
-          setIsNewUserReferred(true);
-          await handleReferral(startParam).catch((err) => console.error("Referral Error:", err));
+          await handleReferral奖励(startParam);
         }
 
         await setDoc(userDocRef, userData);
-        setBalance(userData.balance);
-        setReferralCount(userData.referralCount);
       } else {
         const cloudData = userDoc.data() as UserData;
-        const finalBalance = Math.max(Number(cloudData.balance) || 0, localData.balance);
-        const finalRefs = Math.max(Number(cloudData.referralCount) || 0, localData.referralCount);
+        const updates: any = {};
         
-        setBalance(finalBalance);
-        setReferralCount(finalRefs);
+        if (cloudData.username !== currentUsername) updates.username = currentUsername;
+        if (cloudData.withdrawn === undefined) updates.withdrawn = 0;
+        if (cloudData.adsWatched === undefined) updates.adsWatched = 0;
+        if (cloudData.completedTasks === undefined) updates.completedTasks = [];
         
-        if (localData.balance > (Number(cloudData.balance) || 0)) {
-           await updateDoc(userDocRef, { balance: finalBalance, updatedAt: serverTimestamp() });
-        }
-
-        if (cloudData.username !== currentUsername) {
-          await updateDoc(userDocRef, { 
-            username: currentUsername,
-            updatedAt: serverTimestamp()
-          });
+        if (Object.keys(updates).length > 0) {
+          updates.updatedAt = serverTimestamp();
+          await updateDoc(userDocRef, updates);
         }
       }
     } catch (error) {
-      console.error("Error syncing user:", error);
-      handleLocalModeSync(); 
+      console.error("Sync error detailed:", error);
+      handleFirestoreError(error, OperationType.WRITE, `users/${canonicalId}`);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleReferral = async (referrerId: string) => {
-    const path = `users/${referrerId}`;
+  const handleReferral奖励 = async (referrerId: string) => {
     try {
       const referrerRef = doc(db, 'users', referrerId);
       await updateDoc(referrerRef, {
-        balance: increment(referralBonus),
+        balance: increment(50),
         referralCount: increment(1),
         updatedAt: serverTimestamp()
       });
     } catch (error) {
-      console.error("Referral credit failed:", error);
+      console.error("Referral award failed:", error);
+      handleFirestoreError(error, OperationType.WRITE, `users/${referrerId}`);
     }
   };
 
-  const handleTap = useCallback((e: React.PointerEvent) => {
-    if (e.pointerType === 'touch') {
-      const target = e.currentTarget as HTMLElement;
-      target.style.transform = 'scale(0.95)';
-      setTimeout(() => {
-        target.style.transform = 'scale(1)';
-      }, 100);
+  const startTask = () => {
+    if (completedTasks.includes('join_channel')) return;
+    
+    // Open channel
+    window.open('https://t.me/ebisa_emoji', '_blank');
+    
+    setIsJoinWaiting(true);
+    setCountdown(5);
+    
+    const interval = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const checkTask = async () => {
+    if (countdown > 0) return;
+    
+    setLoading(true);
+    const tgUser = tg?.initDataUnsafe?.user;
+    const canonicalId = tgUser?.id?.toString() || auth.currentUser?.uid;
+    
+    if (canonicalId) {
+      try {
+        const userRef = doc(db, 'users', canonicalId);
+        await updateDoc(userRef, {
+          balance: increment(200),
+          completedTasks: [...completedTasks, 'join_channel'],
+          updatedAt: serverTimestamp()
+        });
+        setNotification("✨ Verified! +200 ETB added to balance.");
+        setTimeout(() => setNotification(null), 3000);
+      } catch (err) {
+        console.error("Task verify error:", err);
+        handleFirestoreError(err, OperationType.WRITE, `users/${canonicalId}`);
+      }
+    }
+    setIsJoinWaiting(false);
+    setLoading(false);
+  };
+
+  const handleWithdrawal = async (amount: number) => {
+    if (amount < 100) {
+      setNotification("Minimum withdrawal is 100 ETB");
+      setTimeout(() => setNotification(null), 3000);
+      return;
+    }
+    if (amount > balance) {
+      setNotification("Insufficient balance");
+      setTimeout(() => setNotification(null), 3000);
+      return;
     }
 
-    setBalance((prev) => {
-      const nextBalance = prev + incrementValue;
-      
-      // 1. ALWAYS Save locally first
-      const tgUser = tg?.initDataUnsafe?.user;
-      const userId = tgUser?.id || 'guest_pilot';
-      localStorage.setItem(`etb_local_data_${userId}`, JSON.stringify({ 
-        balance: nextBalance, 
-        referralCount 
-      }));
+    setWithdrawalPending(true);
+    setWithdrawalStatus('pending');
 
-      // 2. Try to save to Cloud in background
+    setTimeout(async () => {
+      const tgUser = tg?.initDataUnsafe?.user;
       const canonicalId = tgUser?.id?.toString() || auth.currentUser?.uid;
       
       if (canonicalId) {
-        const userRef = doc(db, 'users', canonicalId);
-        updateDoc(userRef, { 
-          balance: increment(incrementValue),
-          updatedAt: serverTimestamp()
-        }).catch(() => {
-          // Cloud failed, we still have local storage backup
-        });
+        try {
+          const userRef = doc(db, 'users', canonicalId);
+          await updateDoc(userRef, {
+            balance: increment(-amount),
+            withdrawn: increment(amount),
+            updatedAt: serverTimestamp()
+          });
+          setWithdrawalStatus('approved');
+          setTimeout(() => {
+            setWithdrawalPending(false);
+            setWithdrawalStatus(null);
+          }, 3000);
+        } catch (err) {
+          console.error("Withdrawal error:", err);
+          handleFirestoreError(err, OperationType.WRITE, `users/${canonicalId}`);
+          setWithdrawalPending(false);
+        }
       }
-      
-      return nextBalance;
-    });
-    
-    const newText: FloatingText = {
-      id: Date.now(),
-      x: e.clientX,
-      y: e.clientY,
-    };
-    setFloatingTexts((prev) => [...prev, newText]);
+    }, 5000);
+  };
 
-    if (tg?.HapticFeedback) {
-      tg.HapticFeedback.impactOccurred('light');
-    }
-
-    setTimeout(() => {
-      setFloatingTexts((prev) => prev.filter(t => t.id !== newText.id));
-    }, 1000);
-  }, [referralCount]);
-
-  const copyReferralLink = () => {
+  const copyRefLink = () => {
     const tgUser = tg?.initDataUnsafe?.user;
-    const userId = tgUser?.id || auth.currentUser?.uid;
-    if (!userId) return;
-    
-    // Your actual bot username
-    const botUser = "Ebbbbbisabot"; 
-    const link = `https://t.me/${botUser}?startapp=${userId}`;
+    const uid = tgUser?.id?.toString() || auth.currentUser?.uid;
+    const botUser = "Ebbbbbisabot";
+    const link = `https://t.me/${botUser}?start=${uid}`;
     
     if (tg?.openTelegramLink) {
-      // In TG WebApp, we can provide a button to share directly
-      tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Join me on ETB TAP and start earning! 🚀")}`);
+      tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Join me on @Ebbbbbisabot and start earning ETB! 💰")}`);
     } else {
       navigator.clipboard.writeText(link);
       setIsCopied(true);
@@ -338,262 +331,375 @@ export default function App() {
     }
   };
 
-  if (loading) {
+  if (loading && !balance) {
     return (
-      <div className="h-screen bg-black flex flex-col items-center justify-center gap-4 p-6 text-center">
-        <div className="w-12 h-12 border-4 border-green-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-zinc-500 text-sm font-mono animate-pulse">Initializing Flight Systems...</p>
+      <div className="h-screen bg-black flex flex-col items-center justify-center gap-4">
+        <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-zinc-500 text-xs font-mono animate-pulse uppercase tracking-[0.3em]">Loading Account...</p>
       </div>
     );
   }
-
-  // Check if auth failed due to settings
-  const isAuthRestricted = !auth.currentUser && !loading;
-  if (isAuthRestricted) {
-    return (
-      <div className="h-screen bg-black flex flex-col items-center justify-center p-8 text-center bg-[radial-gradient(circle_at_center,_#166534_0%,_#000_100%)]">
-        <div className="w-20 h-20 rounded-3xl bg-green-500/20 flex items-center justify-center border border-green-500/30 mb-6">
-          <Rocket className="w-10 h-10 text-green-500 rotate-180" />
-        </div>
-        <h2 className="text-2xl font-black text-white mb-4 font-display">System Restriction</h2>
-        <p className="text-zinc-400 text-sm mb-8 leading-relaxed">
-          The game cannot connect to the server. Please ensure <span className="text-white font-bold">Anonymous Authentication</span> is enabled in your Firebase Project settings.
-        </p>
-        <button 
-          onClick={() => window.location.reload()}
-          className="px-8 py-3 bg-white text-black font-black rounded-xl uppercase tracking-widest text-xs"
-        >
-          Retry Connection
-        </button>
-      </div>
-    );
-  }
-
-  const tgUserId = tg?.initDataUnsafe?.user?.id;
-  const canonicalId = tgUserId?.toString() || auth.currentUser?.uid;
-  const referralLink = `https://t.me/Ebbbbbisabot?startapp=${canonicalId}`;
 
   return (
-    <div className="flex flex-col h-screen max-w-md mx-auto relative select-none touch-none bg-black overflow-hidden font-sans">
+    <div className="flex flex-col h-screen max-w-md mx-auto bg-black text-white relative overflow-hidden font-sans select-none">
+      {/* Dynamic Background */}
+      <div className="absolute inset-0 z-0 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-blue-600/10 blur-[120px] rounded-full" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-purple-600/10 blur-[120px] rounded-full" />
+      </div>
+
       {/* Header */}
-      <header className="p-4 flex items-center justify-between bg-zinc-900/50 backdrop-blur-md border-b border-zinc-800 z-50">
+      <header className="p-4 flex items-center justify-between z-10 bg-zinc-900/40 backdrop-blur-md border-b border-white/5">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-green-500 to-emerald-700 flex items-center justify-center border border-green-400/30">
-            <User className="w-6 h-6 text-white" />
+          <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-blue-600 to-purple-600 flex items-center justify-center border border-white/10">
+            <User className="w-5 h-5" />
           </div>
           <div>
-            <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Active Pilot</p>
-            <p className="text-sm font-black text-white font-display tracking-tight truncate max-w-[120px]">{username}</p>
+            <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Welcome</p>
+            <p className="text-sm font-black truncate max-w-[100px]">{username}</p>
           </div>
         </div>
-        <div className="flex flex-col items-end">
-          <div className="flex items-center gap-1 bg-green-500/10 px-3 py-1.5 rounded-xl border border-green-500/20">
-            <Coins className="w-4 h-4 text-green-400 fill-green-400/20" />
-            <span className="text-sm font-black font-mono text-green-400 tracking-tighter">
-              {Math.floor(balance).toLocaleString()}
-            </span>
-          </div>
+        <div className="bg-white/5 px-3 py-1.5 rounded-full border border-white/10 flex items-center gap-2">
+          <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+          <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Live</span>
         </div>
       </header>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto pb-24">
-        {view === 'tap' ? (
-          <div className="flex flex-col items-center justify-center min-h-full py-12 px-6">
-            <div className="absolute inset-0 z-0 pointer-events-none">
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-green-600/10 blur-[120px] rounded-full" />
-              <div className="absolute top-1/4 left-1/4 w-32 h-32 bg-emerald-600/10 blur-[80px] rounded-full animate-pulse" />
-            </div>
-
+      {/* Main Content Area */}
+      <main className="flex-1 overflow-y-auto pb-28 pt-6 px-4 z-10">
+        <AnimatePresence mode="wait">
+          {view === 'home' && (
             <motion.div 
-              key={Math.floor(balance)}
-              initial={{ scale: 1 }}
-              animate={{ scale: [1, 1.05, 1] }}
-              transition={{ duration: 0.1 }}
-              className="z-10 mb-12 text-center"
+              key="home"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="space-y-6"
             >
-              <h2 className="text-6xl font-black font-display tracking-tighter text-transparent bg-clip-text bg-gradient-to-b from-white via-zinc-200 to-zinc-600 drop-shadow-2xl">
-                {Math.floor(balance).toLocaleString()}
-              </h2>
-              <div className="mt-2 flex items-center justify-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                <p className="text-zinc-500 font-mono text-[10px] uppercase tracking-[0.3em]">Points Earned</p>
+              {/* Dashboard */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-zinc-900/60 p-4 rounded-3xl border border-white/5 flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase">Total Balance</span>
+                  <span className="text-xl font-black text-blue-400">{balance.toLocaleString()} <span className="text-[10px] text-zinc-600">ETB</span></span>
+                </div>
+                <div className="bg-zinc-900/60 p-4 rounded-3xl border border-white/5 flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase">Withdrawn</span>
+                  <span className="text-xl font-black text-purple-400">{withdrawn.toLocaleString()} <span className="text-[10px] text-zinc-600">ETB</span></span>
+                </div>
+                <div className="bg-zinc-900/60 p-4 rounded-3xl border border-white/5 flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase">Ads Watched</span>
+                  <span className="text-xl font-black text-zinc-300">{adsWatched}</span>
+                </div>
+                <div className="bg-zinc-900/60 p-4 rounded-3xl border border-white/5 flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase">Referrals</span>
+                  <span className="text-xl font-black text-zinc-300">{referralCount}</span>
+                </div>
+              </div>
+
+              {/* Main Card */}
+              <div className="bg-gradient-to-br from-blue-600 to-purple-700 p-8 rounded-[40px] text-center shadow-2xl shadow-blue-600/20 relative overflow-hidden group">
+                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-20" />
+                <div className="relative z-10">
+                  <Coins className="w-16 h-16 mx-auto mb-4 text-white/90 drop-shadow-lg" />
+                  <h2 className="text-4xl font-black tracking-tighter mb-1">{balance.toLocaleString()}</h2>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-blue-100/60">Available ETB</p>
+                </div>
+              </div>
+
+              {/* Quick Task Highlight */}
+              <div onClick={() => setView('tasks')} className="bg-white/5 border border-white/10 p-4 rounded-3xl flex items-center justify-between cursor-pointer active:scale-95 transition-transform">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-2xl bg-purple-500/20 flex items-center justify-center border border-purple-500/30">
+                    <Rocket className="w-5 h-5 text-purple-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold">Action Needed</p>
+                    <p className="text-[10px] text-zinc-500">Completing tasks earns you instant ETB</p>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-zinc-600" />
               </div>
             </motion.div>
+          )}
 
-            <div 
-              ref={tapRef}
-              onPointerDown={handleTap}
-              className="relative w-64 h-64 cursor-pointer group active:scale-90 transition-transform duration-75 z-20"
+          {view === 'tasks' && (
+            <motion.div 
+              key="tasks"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-6"
             >
-              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-green-400 via-green-600 to-emerald-900 p-1.5 coin-shadow shadow-green-500/30">
-                <div className="w-full h-full rounded-full bg-zinc-900 flex items-center justify-center relative overflow-hidden">
-                  <div className="absolute inset-0 bg-gradient-to-tr from-green-500/5 to-transparent" />
-                  <Rocket className="w-32 h-32 text-green-400 drop-shadow-[0_0_20px_rgba(34,197,94,0.6)] group-active:rotate-12 transition-transform" />
+              <h2 className="text-2xl font-black">Tasks</h2>
+              
+              <div className="bg-zinc-900 border border-white/5 p-6 rounded-[32px] space-y-6">
+                <div className="flex items-center gap-5">
+                  <div className="w-14 h-14 rounded-3xl bg-blue-500/10 flex items-center justify-center border border-blue-500/20 text-blue-400">
+                    <Share2 className="w-7 h-7" />
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-black">Join @ebisa_emoji</h3>
+                    <p className="text-xs text-zinc-500">Official Telegram Channel</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-black text-green-400">+200</p>
+                    <p className="text-[8px] text-zinc-600 uppercase font-bold">ETB</p>
+                  </div>
                 </div>
-              </div>
-              <div className="absolute inset-x-0 inset-y-0 rounded-full border-4 border-green-500/10 animate-ping opacity-20" />
-            </div>
 
-            <a 
-              href="https://t.me/etb_tap_community" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="mt-16 z-10 flex items-center gap-4 bg-zinc-900/50 backdrop-blur-md border border-zinc-800 p-4 rounded-2xl hover:bg-zinc-800/80 transition-all w-full group overflow-hidden relative"
+                {!completedTasks.includes('join_channel') ? (
+                  !isJoinWaiting ? (
+                    <button 
+                      onClick={startTask}
+                      className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-4 rounded-2xl transition-all"
+                    >
+                      JOIN CHANNEL
+                    </button>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
+                        <motion.div 
+                          initial={{ width: "100%" }}
+                          animate={{ width: "0%" }}
+                          transition={{ duration: 5, ease: "linear" }}
+                          className="h-full bg-blue-500"
+                        />
+                      </div>
+                      <button 
+                        disabled={countdown > 0}
+                        onClick={checkTask}
+                        className={`w-full font-black py-4 rounded-2xl transition-all ${countdown > 0 ? 'bg-zinc-800 text-zinc-600' : 'bg-white text-black'}`}
+                      >
+                        {countdown > 0 ? `WAITING (${countdown}S)` : 'CHECK VERIFICATION'}
+                      </button>
+                    </div>
+                  )
+                ) : (
+                  <div className="w-full bg-green-500/10 border border-green-500/20 text-green-500 font-black py-4 rounded-2xl flex items-center justify-center gap-2">
+                    <CheckCircle2 className="w-5 h-5" />
+                    COMPLETED
+                  </div>
+                )}
+              </div>
+              
+              <div className="p-6 rounded-[32px] border border-dashed border-zinc-800 flex flex-col items-center justify-center py-12 text-center text-zinc-600">
+                <LayoutDashboard className="w-10 h-10 mb-3 opacity-20" />
+                <p className="text-xs font-bold uppercase tracking-widest">More tasks coming soon</p>
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'refer' && (
+            <motion.div 
+              key="refer"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 1.05 }}
+              className="space-y-6"
             >
-              <div className="absolute inset-0 bg-gradient-to-r from-green-600/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
-              <div className="w-12 h-12 rounded-xl bg-green-600/20 flex items-center justify-center border border-green-500/30">
-                <Users className="w-6 h-6 text-green-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-black text-white tracking-widest uppercase italic">Join Fleet</p>
-                <p className="text-[10px] text-zinc-500 font-bold uppercase">Community & Roadmap</p>
-              </div>
-              <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-green-400 transition-colors" />
-            </a>
-          </div>
-        ) : (
-          <div className="flex flex-col p-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-            <h2 className="text-3xl font-black text-white mb-2 font-display">Invite Friends</h2>
-            <p className="text-zinc-500 text-sm mb-8">Earn <span className="text-green-400 font-bold">50 Points</span> for every friend you invite to the mission.</p>
-
-            <div className="bg-zinc-900/50 border border-zinc-800 p-6 rounded-3xl mb-8">
-              <div className="flex items-center justify-between mb-4">
-                <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Your Referrals</p>
-                <span className="bg-green-600 text-white text-xs font-black px-3 py-1 rounded-full uppercase italic">Lv.1 Pilot</span>
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-5xl font-black text-white font-display tracking-tight">{referralCount}</span>
-                <span className="text-zinc-500 font-bold">friends invited</span>
-              </div>
-              <div className="mt-6 flex items-center gap-2 bg-green-500/10 p-3 rounded-xl border border-green-500/20">
-                <Coins className="w-5 h-5 text-green-400" />
-                <p className="text-sm font-bold text-green-400 font-mono tracking-tighter">Total Bonus: {(referralCount * 50).toLocaleString()} Points</p>
-              </div>
-            </div>
-
-            <div className="space-y-4">
-              <div className="relative group">
-                <div className="absolute inset-y-0 right-3 flex items-center">
+              <h2 className="text-2xl font-black">Invite Friends</h2>
+              
+              <div className="bg-zinc-900 border border-white/5 p-8 rounded-[40px] text-center space-y-4">
+                <div className="w-20 h-20 bg-purple-500/10 rounded-full flex items-center justify-center border border-purple-500/20 mx-auto text-purple-400">
+                  <Users className="w-10 h-10" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold">Earn 50 ETB Per Friend</h3>
+                  <p className="text-xs text-zinc-500 px-4 mt-2">Get paid instantly when your friends join through your personal link.</p>
+                </div>
+                
+                <div className="pt-4 space-y-3">
+                  <div className="bg-black/50 p-4 rounded-2xl border border-white/5 flex items-center justify-between">
+                    <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[200px]">t.me/Ebbbbbisabot?start=...</span>
+                    <button onClick={copyRefLink} className="text-blue-400 font-black text-xs">
+                      {isCopied ? 'COPIED' : 'COPY'}
+                    </button>
+                  </div>
                   <button 
-                    onClick={copyReferralLink}
-                    className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-green-400"
+                    onClick={copyRefLink}
+                    className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-black py-4 rounded-2xl"
                   >
-                    {isCopied ? <CheckCircle2 className="w-5 h-5 text-emerald-500" /> : <Copy className="w-5 h-5" />}
+                    SHARE LINK
                   </button>
                 </div>
-                <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-2xl pr-14 overflow-hidden">
-                  <p className="text-xs text-zinc-500 mb-1 font-bold uppercase">Referral Link</p>
-                  <p className="text-sm text-zinc-300 font-mono truncate opacity-60">
-                    {referralLink}
-                  </p>
+              </div>
+
+              <div className="bg-zinc-900 border border-white/5 p-6 rounded-[32px] flex items-center justify-between">
+                <div>
+                  <p className="text-[10px] text-zinc-500 font-bold uppercase">Total Referrals</p>
+                  <p className="text-2xl font-black">{referralCount}</p>
+                </div>
+                <div className="w-1.5 h-10 bg-zinc-800 rounded-full" />
+                <div className="text-right">
+                  <p className="text-[10px] text-zinc-500 font-bold uppercase">Reward Earned</p>
+                  <p className="text-2xl font-black text-green-400">{(referralCount * 50).toLocaleString()} <span className="text-xs text-zinc-600">ETB</span></p>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'wallet' && (
+            <motion.div 
+              key="wallet"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              className="space-y-6"
+            >
+              <h2 className="text-2xl font-black">Wallet</h2>
+              
+              <div className="bg-zinc-900 border border-white/5 p-8 rounded-[40px] space-y-8">
+                <div className="text-center">
+                  <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">Withdrawable Balance</p>
+                  <h3 className="text-4xl font-black text-blue-400">{balance.toLocaleString()} <span className="text-sm text-zinc-600">ETB</span></h3>
+                </div>
+
+                <div className="space-y-3">
+                  <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider ml-1">Select Payment Method</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button className="flex flex-col items-center justify-center p-4 rounded-2xl bg-zinc-800/50 border border-blue-500/30 text-xs font-bold gap-2">
+                      <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-[10px]">TB</div>
+                      Telebirr
+                    </button>
+                    <button className="flex flex-col items-center justify-center p-4 rounded-2xl bg-zinc-800/50 border border-white/5 text-xs text-zinc-500 font-bold gap-2 grayscale brightness-50">
+                      <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-[10px]">MP</div>
+                      M-Pesa
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
+                    <p className="text-[10px] text-zinc-600 font-bold uppercase mb-1">Enter Amount (Min 100 ETB)</p>
+                    <input 
+                      type="number" 
+                      placeholder="0.00"
+                      className="bg-transparent w-full text-xl font-black outline-none placeholder:text-zinc-800"
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        // Store amount logic if needed, here we just use the whole balance for demo or a fixed 100
+                      }}
+                    />
+                  </div>
+                  <button 
+                    onClick={() => handleWithdrawal(balance >= 100 ? balance : 0)}
+                    disabled={balance < 100 || withdrawalPending}
+                    className="w-full bg-white text-black font-black py-4 rounded-2xl disabled:opacity-50 transition-all active:scale-95"
+                  >
+                    WITHDRAW NOW
+                  </button>
+                </div>
+              </div>
+
+              {withdrawalPending && (
+                <div className="bg-blue-600 p-6 rounded-[32px] flex items-center gap-5 border border-blue-400/30 animate-pulse">
+                  <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center">
+                    <CheckCircle2 className={`w-6 h-6 text-white ${withdrawalStatus === 'approved' ? '' : 'animate-spin'}`} />
+                  </div>
+                  <div>
+                    <h4 className="font-black text-white">
+                      {withdrawalStatus === 'pending' ? 'Status: Pending (Processing...)' : 'Status: Approved ✅'}
+                    </h4>
+                    <p className="text-[10px] text-blue-100/60 font-bold">
+                      {withdrawalStatus === 'pending' ? 'Verification with Banking systems...' : 'Money sent to your account.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          )}
+
+          {view === 'profile' && (
+            <motion.div 
+              key="profile"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="space-y-6"
+            >
+              <div className="flex flex-col items-center py-6">
+                <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-blue-600 to-purple-800 p-1 mb-4">
+                  <div className="w-full h-full rounded-full bg-black flex items-center justify-center">
+                    <User className="w-10 h-10 text-white" />
+                  </div>
+                </div>
+                <h2 className="text-xl font-black">{username}</h2>
+                <p className="text-xs text-zinc-500 font-mono">Pilot ID: #{tg?.initDataUnsafe?.user?.id || 'LOCAL'}</p>
+              </div>
+
+              <div className="bg-zinc-900 border border-white/5 rounded-[40px] divide-y divide-white/5 overflow-hidden">
+                <div className="p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <Users className="w-5 h-5 text-zinc-400" />
+                    <span className="text-sm font-bold">Total Friends</span>
+                  </div>
+                  <span className="font-black">{referralCount}</span>
+                </div>
+                <div className="p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <Coins className="w-5 h-5 text-zinc-400" />
+                    <span className="text-sm font-bold">Total Balance</span>
+                  </div>
+                  <span className="font-black text-blue-400">{balance.toLocaleString()} ETB</span>
+                </div>
+                <div className="p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <Wallet className="w-5 h-5 text-zinc-400" />
+                    <span className="text-sm font-bold">Total Withdrawal</span>
+                  </div>
+                  <span className="font-black text-purple-400">{withdrawn.toLocaleString()} ETB</span>
                 </div>
               </div>
 
               <button 
-                onClick={() => {
-                  const link = `https://t.me/share/url?url=${encodeURIComponent(referralLink)}&text=${encodeURIComponent("Join me on ETB TAP and start earning now! 🚀")}`;
-                  tg?.openTelegramLink(link);
-                }}
-                className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-lg shadow-green-600/20"
+                className="w-full bg-zinc-900 p-5 rounded-3xl text-zinc-500 text-xs font-bold uppercase tracking-widest border border-white/5 mt-4"
               >
-                <Share2 className="w-5 h-5" />
-                INVITE A FRIEND
+                Logout / Switch Account
               </button>
-            </div>
-          </div>
-        )}
-      </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
 
       {/* Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 p-4 pb-8 flex justify-around items-center bg-zinc-950/80 backdrop-blur-xl border-t border-zinc-800/50 z-50 h-24">
-        <button 
-          onClick={() => setView('tap')}
-          className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${view === 'tap' ? 'text-green-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'}`}
-        >
-          <LayoutDashboard className={`w-6 h-6 ${view === 'tap' ? 'fill-green-500/10' : ''}`} />
-          <span className="text-[10px] font-black uppercase tracking-tighter italic">Tap</span>
-        </button>
-        
-        <button 
-          onClick={() => setView('friends')}
-          className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${view === 'friends' ? 'text-green-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'}`}
-        >
-          <Users className={`w-6 h-6 ${view === 'friends' ? 'fill-green-500/10' : ''}`} />
-          <span className="text-[10px] font-black uppercase tracking-tighter italic">Friends</span>
-        </button>
-
-        <button 
-          onClick={() => alert("Withdrawal System opening in 7 days!")}
-          className="flex flex-col items-center gap-1.5 text-zinc-500 hover:text-zinc-300 transition-all"
-        >
-          <Wallet className="w-6 h-6" />
-          <span className="text-[10px] font-black uppercase tracking-tighter italic">Bank</span>
-        </button>
+      <nav className="fixed bottom-0 left-0 right-0 p-4 pb-8 flex justify-between items-center bg-zinc-950/80 backdrop-blur-3xl border-t border-white/5 z-20 h-26">
+        <NavButton active={view === 'home'} icon={<LayoutDashboard />} label="Home" onClick={() => setView('home')} />
+        <NavButton active={view === 'tasks'} icon={<Rocket />} label="Tasks" onClick={() => setView('tasks')} />
+        <NavButton active={view === 'refer'} icon={<Users />} label="Refer" onClick={() => setView('refer')} />
+        <NavButton active={view === 'wallet'} icon={<Wallet />} label="Wallet" onClick={() => setView('wallet')} />
+        <NavButton active={view === 'profile'} icon={<User />} label="Profile" onClick={() => setView('profile')} />
       </nav>
 
-      {/* Referral Notification */}
+      {/* Global Notifications */}
       <AnimatePresence>
         {notification && (
           <motion.div
-            initial={{ y: -100, opacity: 0 }}
-            animate={{ y: 20, opacity: 1 }}
-            exit={{ y: -100, opacity: 0 }}
-            className="fixed top-20 inset-x-4 z-[100] bg-green-600 text-white p-4 rounded-2xl shadow-lg border border-green-400/30 flex items-center gap-3"
+            initial={{ y: -50, opacity: 0 }}
+            animate={{ y: 24, opacity: 1 }}
+            exit={{ y: -50, opacity: 0 }}
+            className="fixed top-0 inset-x-4 z-[100] bg-blue-600 text-white p-4 rounded-2xl shadow-2xl shadow-blue-500/20 border border-blue-400/30 flex items-center gap-4"
           >
-            <div className="bg-white/20 p-2 rounded-full">
-              <Users className="w-5 h-5" />
-            </div>
-            <p className="text-xs font-bold leading-tight">{notification}</p>
+            <CheckCircle2 className="w-6 h-6" />
+            <p className="text-xs font-black uppercase tracking-wider">{notification}</p>
           </motion.div>
         )}
-      </AnimatePresence>
-
-      {/* Welcome Message for Referred Users */}
-      <AnimatePresence>
-        {isNewUserReferred && (
-          <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-6"
-          >
-            <div className="bg-zinc-900 border border-zinc-800 p-8 rounded-[40px] text-center max-w-sm">
-              <div className="w-20 h-20 bg-green-500/20 rounded-3xl flex items-center justify-center border border-green-500/30 mx-auto mb-6">
-                <Rocket className="w-10 h-10 text-green-400" />
-              </div>
-              <h3 className="text-2xl font-black text-white mb-2">Welcome Pilot!</h3>
-              <p className="text-zinc-400 text-sm mb-8">
-                Welcome to @Ebbbbbisabot! You were successfully referred and can now start earning points.
-              </p>
-              <button 
-                onClick={() => setIsNewUserReferred(false)}
-                className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-4 rounded-2xl transition-all"
-              >
-                START EARNING
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Floating Indicators */}
-      <AnimatePresence>
-        {floatingTexts.map((text) => (
-          <motion.div
-            key={text.id}
-            initial={{ opacity: 1, y: text.y, x: text.x }}
-            animate={{ opacity: 0, y: text.y - 150 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.8, ease: "easeOut" }}
-            className="fixed z-[100] pointer-events-none select-none"
-          >
-            <span className="text-3xl font-black text-white drop-shadow-[0_4px_8px_rgba(0,0,0,0.9)] italic">
-              +{incrementValue}
-            </span>
-          </motion.div>
-        ))}
       </AnimatePresence>
     </div>
+  );
+}
+
+function NavButton({ active, icon, label, onClick }: { active: boolean, icon: React.ReactNode, label: string, onClick: () => void }) {
+  return (
+    <button 
+      onClick={onClick}
+      className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${active ? 'text-blue-500 scale-110' : 'text-zinc-600 hover:text-zinc-400'}`}
+    >
+      <div className={`${active ? 'bg-blue-500/10 p-2 rounded-xl border border-blue-500/20' : ''}`}>
+        {React.cloneElement(icon as React.ReactElement, { className: 'w-5 h-5' })}
+      </div>
+      <span className="text-[9px] font-black uppercase tracking-tighter italic">{label}</span>
+      {active && <motion.div layoutId="nav-dot" className="w-1 h-1 rounded-full bg-blue-500 mt-1" />}
+    </button>
   );
 }
 

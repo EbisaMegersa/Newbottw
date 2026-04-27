@@ -6,8 +6,11 @@
       "type": "object",
       "properties": {
         "username": { "type": "string" },
-        "balance": { "type": "number" },
+        "balance": { "type": "number", "description": "Current spendable balance" },
+        "withdrawn": { "type": "number", "description": "Total amount withdrawn" },
+        "adsWatched": { "type": "number", "description": "Total ads watched" },
         "referralCount": { "type": "number" },
+        "completedTasks": { "type": "array", "items": { "type": "string" } },
         "referredBy": { "type": "string", "description": "ID of the user who referred this user" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
