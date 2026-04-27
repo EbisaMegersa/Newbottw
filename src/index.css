@@ -10,12 +10,12 @@
 @layer base {
   body {
     @apply bg-black text-white antialiased overflow-hidden;
-    background: radial-gradient(circle at top center, #4d1a1a 0%, #000000 100%);
+    background: radial-gradient(circle at top center, #1a4d1a 0%, #000000 100%);
   }
 }
 
 .coin-shadow {
-  box-shadow: 0 0 50px rgba(239, 68, 68, 0.2);
+  box-shadow: 0 0 50px rgba(74, 222, 128, 0.2);
 }
 
 .tap-indicator {

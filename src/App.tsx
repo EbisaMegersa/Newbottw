@@ -16,14 +16,51 @@ import {
   updateDoc, 
   increment, 
   serverTimestamp, 
-  runTransaction 
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
+
+// Firestore Error Handling
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+  }
+}
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 const auth = getAuth(app);
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error Detailed: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 declare global {
   interface Window {
@@ -97,7 +134,7 @@ export default function App() {
 
   const handleLocalModeSync = () => {
     const tgUser = tg?.initDataUnsafe?.user;
-    const userId = tgUser?.id ? `tg_${tgUser.id}` : 'guest_pilot';
+    const userId = tgUser?.id || 'guest_pilot';
     const stored = localStorage.getItem(`etb_local_data_${userId}`);
     
     if (stored) {
@@ -110,49 +147,76 @@ export default function App() {
   };
 
   const syncUser = async (uid: string) => {
+    const tgUser = tg?.initDataUnsafe?.user;
+    // CRITICAL: We prioritize the Telegram ID as the document ID for stability and referrals
+    const canonicalId = tgUser?.id?.toString() || uid;
+    const tgId = tgUser?.id?.toString() || 'unknown';
+    const path = `users/${canonicalId}`;
+    
     try {
-      const userDocRef = doc(db, 'users', uid);
-      const userDoc = await getDoc(userDocRef);
+      const userDocRef = doc(db, 'users', canonicalId);
+      let userDoc;
+      try {
+        userDoc = await getDoc(userDocRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, path);
+        return;
+      }
       
-      const tgUser = tg?.initDataUnsafe?.user;
       const startParam = tg?.initDataUnsafe?.start_param; 
       const currentUsername = tgUser?.username || tgUser?.first_name || 'Pilot';
       setUsername(currentUsername);
 
+      // Load local balance as a starting point/fallback
+      const localStored = localStorage.getItem(`etb_local_data_${tgId}`);
+      const localData = localStored ? JSON.parse(localStored) : { balance: 0, referralCount: 0 };
+
       if (!userDoc.exists()) {
         const userData: UserData = {
           username: currentUsername,
-          balance: 0,
-          referralCount: 0,
+          balance: localData.balance, // Merge local progress
+          referralCount: localData.referralCount,
           createdAt: serverTimestamp(),
         };
 
-        if (startParam && startParam !== uid && startParam !== tgUser?.id?.toString()) {
+        // Important: startParam is the Canonical ID of the referrer
+        if (startParam && startParam !== canonicalId) {
           userData.referredBy = startParam;
-          await handleReferral(startParam);
+          await handleReferral(startParam).catch((err) => console.error("Referral Error:", err));
         }
 
         await setDoc(userDocRef, userData);
-        setBalance(0);
-        setReferralCount(0);
+        setBalance(userData.balance);
+        setReferralCount(userData.referralCount);
       } else {
-        const data = userDoc.data() as UserData;
-        setBalance(data.balance);
-        setReferralCount(data.referralCount);
+        const cloudData = userDoc.data() as UserData;
+        const finalBalance = Math.max(cloudData.balance, localData.balance);
+        const finalRefs = Math.max(cloudData.referralCount, localData.referralCount);
         
-        if (data.username !== currentUsername) {
-          await updateDoc(userDocRef, { username: currentUsername });
+        setBalance(finalBalance);
+        setReferralCount(finalRefs);
+        
+        if (localData.balance > cloudData.balance) {
+           await updateDoc(userDocRef, { balance: finalBalance, updatedAt: serverTimestamp() });
+        }
+
+        if (cloudData.username !== currentUsername) {
+          await updateDoc(userDocRef, { 
+            username: currentUsername,
+            updatedAt: serverTimestamp()
+          });
         }
       }
     } catch (error) {
       console.error("Error syncing user:", error);
-      handleLocalModeSync(); // Fallback on firestore error
+      handleLocalModeSync(); 
     } finally {
       setLoading(false);
     }
   };
 
   const handleReferral = async (referrerId: string) => {
+    const path = `users/${referrerId}`;
     try {
       const referrerRef = doc(db, 'users', referrerId);
       await updateDoc(referrerRef, {
@@ -174,7 +238,32 @@ export default function App() {
       }, 100);
     }
 
-    setBalance((prev) => prev + incrementValue);
+    setBalance((prev) => {
+      const nextBalance = prev + incrementValue;
+      
+      // 1. ALWAYS Save locally first
+      const tgUser = tg?.initDataUnsafe?.user;
+      const userId = tgUser?.id || 'guest_pilot';
+      localStorage.setItem(`etb_local_data_${userId}`, JSON.stringify({ 
+        balance: nextBalance, 
+        referralCount 
+      }));
+
+      // 2. Try to save to Cloud in background
+      const canonicalId = tgUser?.id?.toString() || auth.currentUser?.uid;
+      
+      if (canonicalId) {
+        const userRef = doc(db, 'users', canonicalId);
+        updateDoc(userRef, { 
+          balance: increment(incrementValue),
+          updatedAt: serverTimestamp()
+        }).catch(() => {
+          // Cloud failed, we still have local storage backup
+        });
+      }
+      
+      return nextBalance;
+    });
     
     const newText: FloatingText = {
       id: Date.now(),
@@ -183,24 +272,6 @@ export default function App() {
     };
     setFloatingTexts((prev) => [...prev, newText]);
 
-    // Update persistence
-    const uid = auth.currentUser?.uid;
-    if (uid) {
-      const userRef = doc(db, 'users', uid);
-      updateDoc(userRef, { 
-        balance: increment(incrementValue),
-        updatedAt: serverTimestamp()
-      }).catch(() => {
-        // Silent fail for debounced/rapid taps
-      });
-    } else {
-      // Local fallback saving
-      const tgUser = tg?.initDataUnsafe?.user;
-      const userId = tgUser?.id ? `tg_${tgUser.id}` : 'guest_pilot';
-      const localData = { balance: balance + incrementValue, referralCount };
-      localStorage.setItem(`etb_local_data_${userId}`, JSON.stringify(localData));
-    }
-
     if (tg?.HapticFeedback) {
       tg.HapticFeedback.impactOccurred('light');
     }
@@ -208,7 +279,7 @@ export default function App() {
     setTimeout(() => {
       setFloatingTexts((prev) => prev.filter(t => t.id !== newText.id));
     }, 1000);
-  }, [balance, referralCount]);
+  }, [referralCount]);
 
   const copyReferralLink = () => {
     const tgUser = tg?.initDataUnsafe?.user;
@@ -232,7 +303,7 @@ export default function App() {
   if (loading) {
     return (
       <div className="h-screen bg-black flex flex-col items-center justify-center gap-4 p-6 text-center">
-        <div className="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin" />
+        <div className="w-12 h-12 border-4 border-green-500 border-t-transparent rounded-full animate-spin" />
         <p className="text-zinc-500 text-sm font-mono animate-pulse">Initializing Flight Systems...</p>
       </div>
     );
@@ -242,9 +313,9 @@ export default function App() {
   const isAuthRestricted = !auth.currentUser && !loading;
   if (isAuthRestricted) {
     return (
-      <div className="h-screen bg-black flex flex-col items-center justify-center p-8 text-center bg-[radial-gradient(circle_at_center,_#1e1b4b_0%,_#000_100%)]">
-        <div className="w-20 h-20 rounded-3xl bg-red-500/20 flex items-center justify-center border border-red-500/30 mb-6">
-          <Rocket className="w-10 h-10 text-red-500 rotate-180" />
+      <div className="h-screen bg-black flex flex-col items-center justify-center p-8 text-center bg-[radial-gradient(circle_at_center,_#166534_0%,_#000_100%)]">
+        <div className="w-20 h-20 rounded-3xl bg-green-500/20 flex items-center justify-center border border-green-500/30 mb-6">
+          <Rocket className="w-10 h-10 text-green-500 rotate-180" />
         </div>
         <h2 className="text-2xl font-black text-white mb-4 font-display">System Restriction</h2>
         <p className="text-zinc-400 text-sm mb-8 leading-relaxed">
@@ -261,14 +332,15 @@ export default function App() {
   }
 
   const tgUserId = tg?.initDataUnsafe?.user?.id;
-  const referralLink = `https://t.me/Ebbbbbisabot?startapp=${tgUserId || auth.currentUser?.uid}`;
+  const canonicalId = tgUserId?.toString() || auth.currentUser?.uid;
+  const referralLink = `https://t.me/Ebbbbbisabot?startapp=${canonicalId}`;
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto relative select-none touch-none bg-black overflow-hidden font-sans">
       {/* Header */}
       <header className="p-4 flex items-center justify-between bg-zinc-900/50 backdrop-blur-md border-b border-zinc-800 z-50">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-red-500 to-rose-700 flex items-center justify-center border border-red-400/30">
+          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-green-500 to-emerald-700 flex items-center justify-center border border-green-400/30">
             <User className="w-6 h-6 text-white" />
           </div>
           <div>
@@ -277,9 +349,9 @@ export default function App() {
           </div>
         </div>
         <div className="flex flex-col items-end">
-          <div className="flex items-center gap-1 bg-red-500/10 px-3 py-1.5 rounded-xl border border-red-500/20">
-            <Coins className="w-4 h-4 text-red-400 fill-red-400/20" />
-            <span className="text-sm font-black font-mono text-red-400 tracking-tighter">
+          <div className="flex items-center gap-1 bg-green-500/10 px-3 py-1.5 rounded-xl border border-green-500/20">
+            <Coins className="w-4 h-4 text-green-400 fill-green-400/20" />
+            <span className="text-sm font-black font-mono text-green-400 tracking-tighter">
               {Math.floor(balance).toLocaleString()}
             </span>
           </div>
@@ -291,8 +363,8 @@ export default function App() {
         {view === 'tap' ? (
           <div className="flex flex-col items-center justify-center min-h-full py-12 px-6">
             <div className="absolute inset-0 z-0 pointer-events-none">
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-red-600/10 blur-[120px] rounded-full" />
-              <div className="absolute top-1/4 left-1/4 w-32 h-32 bg-rose-600/10 blur-[80px] rounded-full animate-pulse" />
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-green-600/10 blur-[120px] rounded-full" />
+              <div className="absolute top-1/4 left-1/4 w-32 h-32 bg-emerald-600/10 blur-[80px] rounded-full animate-pulse" />
             </div>
 
             <motion.div 
@@ -306,7 +378,7 @@ export default function App() {
                 {Math.floor(balance).toLocaleString()}
               </h2>
               <div className="mt-2 flex items-center justify-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                 <p className="text-zinc-500 font-mono text-[10px] uppercase tracking-[0.3em]">Tokens Collected</p>
               </div>
             </motion.div>
@@ -316,13 +388,13 @@ export default function App() {
               onPointerDown={handleTap}
               className="relative w-64 h-64 cursor-pointer group active:scale-90 transition-transform duration-75 z-20"
             >
-              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-red-400 via-red-600 to-rose-900 p-1.5 coin-shadow shadow-red-500/30">
+              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-green-400 via-green-600 to-emerald-900 p-1.5 coin-shadow shadow-green-500/30">
                 <div className="w-full h-full rounded-full bg-zinc-900 flex items-center justify-center relative overflow-hidden">
-                  <div className="absolute inset-0 bg-gradient-to-tr from-red-500/5 to-transparent" />
-                  <Rocket className="w-32 h-32 text-red-400 drop-shadow-[0_0_20px_rgba(239,68,68,0.6)] group-active:rotate-12 transition-transform" />
+                  <div className="absolute inset-0 bg-gradient-to-tr from-green-500/5 to-transparent" />
+                  <Rocket className="w-32 h-32 text-green-400 drop-shadow-[0_0_20px_rgba(34,197,94,0.6)] group-active:rotate-12 transition-transform" />
                 </div>
               </div>
-              <div className="absolute inset-x-0 inset-y-0 rounded-full border-4 border-red-500/10 animate-ping opacity-20" />
+              <div className="absolute inset-x-0 inset-y-0 rounded-full border-4 border-green-500/10 animate-ping opacity-20" />
             </div>
 
             <a 
@@ -331,34 +403,34 @@ export default function App() {
               rel="noopener noreferrer"
               className="mt-16 z-10 flex items-center gap-4 bg-zinc-900/50 backdrop-blur-md border border-zinc-800 p-4 rounded-2xl hover:bg-zinc-800/80 transition-all w-full group overflow-hidden relative"
             >
-              <div className="absolute inset-0 bg-gradient-to-r from-red-600/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
-              <div className="w-12 h-12 rounded-xl bg-red-600/20 flex items-center justify-center border border-red-500/30">
-                <Users className="w-6 h-6 text-red-400" />
+              <div className="absolute inset-0 bg-gradient-to-r from-green-600/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
+              <div className="w-12 h-12 rounded-xl bg-green-600/20 flex items-center justify-center border border-green-500/30">
+                <Users className="w-6 h-6 text-green-400" />
               </div>
               <div className="flex-1">
                 <p className="text-sm font-black text-white tracking-widest uppercase italic">Join Fleet</p>
                 <p className="text-[10px] text-zinc-500 font-bold uppercase">Community & Roadmap</p>
               </div>
-              <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-red-400 transition-colors" />
+              <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-green-400 transition-colors" />
             </a>
           </div>
         ) : (
           <div className="flex flex-col p-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
             <h2 className="text-3xl font-black text-white mb-2 font-display">Invite Friends</h2>
-            <p className="text-zinc-500 text-sm mb-8">Earn <span className="text-red-400 font-bold">100 ETB</span> for every friend you invite to the mission.</p>
+            <p className="text-zinc-500 text-sm mb-8">Earn <span className="text-green-400 font-bold">100 ETB</span> for every friend you invite to the mission.</p>
 
             <div className="bg-zinc-900/50 border border-zinc-800 p-6 rounded-3xl mb-8">
               <div className="flex items-center justify-between mb-4">
                 <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Your Referrals</p>
-                <span className="bg-red-600 text-white text-xs font-black px-3 py-1 rounded-full uppercase italic">Lv.1 Pilot</span>
+                <span className="bg-green-600 text-white text-xs font-black px-3 py-1 rounded-full uppercase italic">Lv.1 Pilot</span>
               </div>
               <div className="flex items-baseline gap-2">
                 <span className="text-5xl font-black text-white font-display tracking-tight">{referralCount}</span>
                 <span className="text-zinc-500 font-bold">friends invited</span>
               </div>
-              <div className="mt-6 flex items-center gap-2 bg-red-500/10 p-3 rounded-xl border border-red-500/20">
-                <Coins className="w-5 h-5 text-red-400" />
-                <p className="text-sm font-bold text-red-400 font-mono tracking-tighter">Total Bonus: {(referralCount * 100).toLocaleString()} ETB</p>
+              <div className="mt-6 flex items-center gap-2 bg-green-500/10 p-3 rounded-xl border border-green-500/20">
+                <Coins className="w-5 h-5 text-green-400" />
+                <p className="text-sm font-bold text-green-400 font-mono tracking-tighter">Total Bonus: {(referralCount * 100).toLocaleString()} ETB</p>
               </div>
             </div>
 
@@ -367,7 +439,7 @@ export default function App() {
                 <div className="absolute inset-y-0 right-3 flex items-center">
                   <button 
                     onClick={copyReferralLink}
-                    className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-red-400"
+                    className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-green-400"
                   >
                     {isCopied ? <CheckCircle2 className="w-5 h-5 text-emerald-500" /> : <Copy className="w-5 h-5" />}
                   </button>
@@ -385,7 +457,7 @@ export default function App() {
                   const link = `https://t.me/share/url?url=${encodeURIComponent(referralLink)}&text=${encodeURIComponent("Join me on ETB TAP and start earning now! 🚀")}`;
                   tg?.openTelegramLink(link);
                 }}
-                className="w-full bg-red-600 hover:bg-red-500 text-white font-black py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-lg shadow-red-600/20"
+                className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-lg shadow-green-600/20"
               >
                 <Share2 className="w-5 h-5" />
                 INVITE A FRIEND
@@ -399,17 +471,17 @@ export default function App() {
       <nav className="fixed bottom-0 left-0 right-0 p-4 pb-8 flex justify-around items-center bg-zinc-950/80 backdrop-blur-xl border-t border-zinc-800/50 z-50 h-24">
         <button 
           onClick={() => setView('tap')}
-          className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${view === 'tap' ? 'text-red-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'}`}
+          className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${view === 'tap' ? 'text-green-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
-          <LayoutDashboard className={`w-6 h-6 ${view === 'tap' ? 'fill-red-500/10' : ''}`} />
+          <LayoutDashboard className={`w-6 h-6 ${view === 'tap' ? 'fill-green-500/10' : ''}`} />
           <span className="text-[10px] font-black uppercase tracking-tighter italic">Tap</span>
         </button>
         
         <button 
           onClick={() => setView('friends')}
-          className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${view === 'friends' ? 'text-red-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'}`}
+          className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${view === 'friends' ? 'text-green-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
-          <Users className={`w-6 h-6 ${view === 'friends' ? 'fill-red-500/10' : ''}`} />
+          <Users className={`w-6 h-6 ${view === 'friends' ? 'fill-green-500/10' : ''}`} />
           <span className="text-[10px] font-black uppercase tracking-tighter italic">Friends</span>
         </button>
 
