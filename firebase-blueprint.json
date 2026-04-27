@@ -1,5 +1,18 @@
 {
   "entities": {
+    "Log": {
+      "title": "Log",
+      "description": "System error log data",
+      "type": "object",
+      "properties": {
+        "level": { "type": "string" },
+        "context": { "type": "string" },
+        "message": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "adminNotified": { "type": "boolean" }
+      },
+      "required": ["level", "context", "message", "timestamp"]
+    },
     "User": {
       "title": "User",
       "description": "Stores user progress and referral data",
@@ -43,6 +56,10 @@
     "withdrawals/{withdrawalId}": {
       "schema": "Withdrawal",
       "description": "Global queue of withdrawal requests for admin approval"
+    },
+    "logs/{logId}": {
+      "schema": "Log",
+      "description": "System error logs for admin review"
     }
   }
 }

@@ -215,74 +215,32 @@ export default function App() {
   const syncUser = async (uid: string) => {
     const tgUser = tg?.initDataUnsafe?.user;
     const canonicalId = tgUser?.id?.toString() || uid;
+    const startParam = tg?.initDataUnsafe?.start_param; 
     
     try {
-      const userDocRef = doc(db, 'users', canonicalId);
-      let userDoc;
-      try {
-        userDoc = await getDoc(userDocRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, `users/${canonicalId}`);
-        return;
+      // Use Backend for Sync (and Referral Reward)
+      const response = await fetch('/api/sync-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: canonicalId,
+          username: tgUser?.username || tgUser?.first_name || 'User',
+          startParam: startParam,
+          firebaseUid: auth.currentUser?.uid || ''
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to sync with backend");
       }
-      const currentUsername = tgUser?.username || tgUser?.first_name || 'User';
-      setUsername(currentUsername);
 
-      if (!userDoc.exists()) {
-        const startParam = tg?.initDataUnsafe?.start_param; 
-        const userData: UserData = {
-          username: currentUsername,
-          firebaseUid: auth.currentUser?.uid || '',
-          balance: 0,
-          withdrawn: 0,
-          adsWatched: 0,
-          referralCount: 0,
-          completedTasks: [],
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        };
-
-        if (startParam && startParam !== canonicalId) {
-          userData.referredBy = startParam;
-          await handleReferral奖励(startParam);
-        }
-
-        await setDoc(userDocRef, userData);
-      } else {
-        const cloudData = userDoc.data() as UserData;
-        const updates: any = {};
-        
-        if (cloudData.username !== currentUsername) updates.username = currentUsername;
-        if (cloudData.firebaseUid === undefined) updates.firebaseUid = uid;
-        if (cloudData.referralCount === undefined) updates.referralCount = 0;
-        if (cloudData.withdrawn === undefined) updates.withdrawn = 0;
-        if (cloudData.adsWatched === undefined) updates.adsWatched = 0;
-        if (cloudData.completedTasks === undefined) updates.completedTasks = [];
-        
-        if (Object.keys(updates).length > 0) {
-          updates.updatedAt = serverTimestamp();
-          await updateDoc(userDocRef, updates);
-        }
-      }
+      setUsername(tgUser?.username || tgUser?.first_name || 'User');
     } catch (error) {
-      console.error("Sync error detailed:", error);
-      handleFirestoreError(error, OperationType.WRITE, `users/${canonicalId}`);
+      console.error("Sync error:", error);
+      setNotification("⚠️ Connection Error. Using local fallback.");
+      setTimeout(() => setNotification(null), 3000);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleReferral奖励 = async (referrerId: string) => {
-    try {
-      const referrerRef = doc(db, 'users', referrerId);
-      await updateDoc(referrerRef, {
-        balance: increment(50),
-        referralCount: increment(1),
-        updatedAt: serverTimestamp()
-      });
-    } catch (error) {
-      console.error("Referral award failed:", error);
-      handleFirestoreError(error, OperationType.WRITE, `users/${referrerId}`);
     }
   };
 
@@ -311,25 +269,44 @@ export default function App() {
     
     setLoading(true);
     const tgUser = tg?.initDataUnsafe?.user;
-    const canonicalId = tgUser?.id?.toString() || auth.currentUser?.uid;
+    const canonicalId = tgUser?.id?.toString();
     
     if (canonicalId) {
       try {
-        const userRef = doc(db, 'users', canonicalId);
-        await updateDoc(userRef, {
-          balance: increment(200),
-          completedTasks: [...completedTasks, 'join_channel'],
-          updatedAt: serverTimestamp()
+        const response = await fetch('/api/verify-task', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: canonicalId, taskId: 'join_channel' })
         });
-        setNotification("✨ Verified! +200 ETB added to balance.");
-        setTimeout(() => setNotification(null), 3000);
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+          setNotification("✨ Verified! +200 ETB added.");
+          setIsJoinWaiting(false);
+        } else {
+          setNotification(`❌ ${data.error || "Please join the channel first!"}`);
+          // Add 5s cooldown on error too to prevent spam
+          setCountdown(5);
+          const interval = setInterval(() => {
+            setCountdown((prev) => {
+              if (prev <= 1) {
+                clearInterval(interval);
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+        }
       } catch (err) {
-        console.error("Task verify error:", err);
-        handleFirestoreError(err, OperationType.WRITE, `users/${canonicalId}`);
+        setNotification("⚠️ Server error. Please retry.");
+        console.error("Verify Error:", err);
+        // Show retry feel
+        setIsJoinWaiting(true);
       }
     }
-    setIsJoinWaiting(false);
     setLoading(false);
+    setTimeout(() => setNotification(null), 4000);
   };
 
   const handleWithdrawalRequest = async () => {

@@ -47,6 +47,7 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow get: if isSignedIn();
+      allow list: if isAdmin();
       
       allow create: if isSignedIn() && isValidUser(request.resource.data) &&
                       request.resource.data.firebaseUid == request.auth.uid &&
@@ -85,6 +86,10 @@ service cloud.firestore {
                       request.resource.data.status == 'pending' &&
                       request.resource.data.createdAt == request.time;
       allow update: if isAdmin();
+    }
+
+    match /logs/{logId} {
+      allow read, write: if isAdmin();
     }
   }
 }
