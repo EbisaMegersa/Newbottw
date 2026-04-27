@@ -16,6 +16,7 @@ import {
   updateDoc, 
   increment, 
   serverTimestamp, 
+  onSnapshot
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -97,7 +98,10 @@ export default function App() {
   
   const tapRef = useRef<HTMLDivElement>(null);
   const incrementValue = 1;
-  const referralBonus = 100;
+  const referralBonus = 50;
+
+  const [notification, setNotification] = useState<string | null>(null);
+  const [isNewUserReferred, setIsNewUserReferred] = useState(false);
 
   // Telegram helper
   const tg = window.Telegram?.WebApp;
@@ -109,10 +113,36 @@ export default function App() {
       tg.enableClosingConfirmation();
     }
 
+    let snapshotUnsubscribe: (() => void) | null = null;
+
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       try {
         if (firebaseUser) {
+          const tgUser = tg?.initDataUnsafe?.user;
+          const canonicalId = tgUser?.id?.toString() || firebaseUser.uid;
+          
           await syncUser(firebaseUser.uid);
+
+          // Real-time listener for balance and referral updates
+          const userDocRef = doc(db, 'users', canonicalId);
+          snapshotUnsubscribe = onSnapshot(userDocRef, (snapshot) => {
+            if (snapshot.exists()) {
+              const data = snapshot.data();
+              
+              setBalance((prev) => {
+                if (data.balance > prev && data.balance - prev === referralBonus) {
+                  setNotification("✨ Success! Someone joined using your link. +50 points have been added to your balance!");
+                  setTimeout(() => setNotification(null), 5000);
+                }
+                return data.balance;
+              });
+              
+              setReferralCount(data.referralCount);
+            }
+          }, (err) => {
+             console.error("Snapshot error:", err);
+          });
+
         } else {
           await signInAnonymously(auth).catch((err) => {
             if (err.code === 'auth/admin-restricted-operation') {
@@ -129,7 +159,10 @@ export default function App() {
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      if (snapshotUnsubscribe) (snapshotUnsubscribe as () => void)();
+    };
   }, []);
 
   const handleLocalModeSync = () => {
@@ -169,12 +202,16 @@ export default function App() {
 
       // Load local balance as a starting point/fallback
       const localStored = localStorage.getItem(`etb_local_data_${tgId}`);
-      const localData = localStored ? JSON.parse(localStored) : { balance: 0, referralCount: 0 };
+      const localDataRaw = localStored ? JSON.parse(localStored) : { balance: 0, referralCount: 0 };
+      const localData = {
+        balance: Number(localDataRaw.balance) || 0,
+        referralCount: Number(localDataRaw.referralCount) || 0
+      };
 
       if (!userDoc.exists()) {
         const userData: UserData = {
           username: currentUsername,
-          balance: localData.balance, // Merge local progress
+          balance: localData.balance, 
           referralCount: localData.referralCount,
           createdAt: serverTimestamp(),
         };
@@ -182,6 +219,7 @@ export default function App() {
         // Important: startParam is the Canonical ID of the referrer
         if (startParam && startParam !== canonicalId) {
           userData.referredBy = startParam;
+          setIsNewUserReferred(true);
           await handleReferral(startParam).catch((err) => console.error("Referral Error:", err));
         }
 
@@ -190,13 +228,13 @@ export default function App() {
         setReferralCount(userData.referralCount);
       } else {
         const cloudData = userDoc.data() as UserData;
-        const finalBalance = Math.max(cloudData.balance, localData.balance);
-        const finalRefs = Math.max(cloudData.referralCount, localData.referralCount);
+        const finalBalance = Math.max(Number(cloudData.balance) || 0, localData.balance);
+        const finalRefs = Math.max(Number(cloudData.referralCount) || 0, localData.referralCount);
         
         setBalance(finalBalance);
         setReferralCount(finalRefs);
         
-        if (localData.balance > cloudData.balance) {
+        if (localData.balance > (Number(cloudData.balance) || 0)) {
            await updateDoc(userDocRef, { balance: finalBalance, updatedAt: serverTimestamp() });
         }
 
@@ -379,7 +417,7 @@ export default function App() {
               </h2>
               <div className="mt-2 flex items-center justify-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                <p className="text-zinc-500 font-mono text-[10px] uppercase tracking-[0.3em]">Tokens Collected</p>
+                <p className="text-zinc-500 font-mono text-[10px] uppercase tracking-[0.3em]">Points Earned</p>
               </div>
             </motion.div>
 
@@ -417,7 +455,7 @@ export default function App() {
         ) : (
           <div className="flex flex-col p-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
             <h2 className="text-3xl font-black text-white mb-2 font-display">Invite Friends</h2>
-            <p className="text-zinc-500 text-sm mb-8">Earn <span className="text-green-400 font-bold">100 ETB</span> for every friend you invite to the mission.</p>
+            <p className="text-zinc-500 text-sm mb-8">Earn <span className="text-green-400 font-bold">50 Points</span> for every friend you invite to the mission.</p>
 
             <div className="bg-zinc-900/50 border border-zinc-800 p-6 rounded-3xl mb-8">
               <div className="flex items-center justify-between mb-4">
@@ -430,7 +468,7 @@ export default function App() {
               </div>
               <div className="mt-6 flex items-center gap-2 bg-green-500/10 p-3 rounded-xl border border-green-500/20">
                 <Coins className="w-5 h-5 text-green-400" />
-                <p className="text-sm font-bold text-green-400 font-mono tracking-tighter">Total Bonus: {(referralCount * 100).toLocaleString()} ETB</p>
+                <p className="text-sm font-bold text-green-400 font-mono tracking-tighter">Total Bonus: {(referralCount * 50).toLocaleString()} Points</p>
               </div>
             </div>
 
@@ -493,6 +531,50 @@ export default function App() {
           <span className="text-[10px] font-black uppercase tracking-tighter italic">Bank</span>
         </button>
       </nav>
+
+      {/* Referral Notification */}
+      <AnimatePresence>
+        {notification && (
+          <motion.div
+            initial={{ y: -100, opacity: 0 }}
+            animate={{ y: 20, opacity: 1 }}
+            exit={{ y: -100, opacity: 0 }}
+            className="fixed top-20 inset-x-4 z-[100] bg-green-600 text-white p-4 rounded-2xl shadow-lg border border-green-400/30 flex items-center gap-3"
+          >
+            <div className="bg-white/20 p-2 rounded-full">
+              <Users className="w-5 h-5" />
+            </div>
+            <p className="text-xs font-bold leading-tight">{notification}</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Welcome Message for Referred Users */}
+      <AnimatePresence>
+        {isNewUserReferred && (
+          <motion.div
+            initial={{ scale: 0.8, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-6"
+          >
+            <div className="bg-zinc-900 border border-zinc-800 p-8 rounded-[40px] text-center max-w-sm">
+              <div className="w-20 h-20 bg-green-500/20 rounded-3xl flex items-center justify-center border border-green-500/30 mx-auto mb-6">
+                <Rocket className="w-10 h-10 text-green-400" />
+              </div>
+              <h3 className="text-2xl font-black text-white mb-2">Welcome Pilot!</h3>
+              <p className="text-zinc-400 text-sm mb-8">
+                Welcome to @Ebbbbbisabot! You were successfully referred and can now start earning points.
+              </p>
+              <button 
+                onClick={() => setIsNewUserReferred(false)}
+                className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-4 rounded-2xl transition-all"
+              >
+                START EARNING
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Floating Indicators */}
       <AnimatePresence>

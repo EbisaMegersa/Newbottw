@@ -17,37 +17,28 @@ service cloud.firestore {
     }
 
     function isValidUser(data) {
-      return data.username is string && data.username.size() <= 100 &&
-             data.balance is number && data.balance >= 0 &&
-             data.referralCount is int &&
-             (data.referredBy == null || data.referredBy is string);
+      return data.username is string && 
+             data.balance is number && 
+             data.referralCount is number &&
+             (!('referredBy' in data) || data.referredBy is string);
     }
 
     match /users/{userId} {
-      // Allow any signed in user to read profiles (needed for referrals and search)
       allow get: if isSignedIn();
       
-      // Allow creation if signed in. We validate the initial state.
       allow create: if isSignedIn() && isValidUser(request.resource.data) &&
-                      request.resource.data.balance >= 0 &&
-                      request.resource.data.referralCount >= 0 &&
                       request.resource.data.createdAt == request.time;
       
-      // Allow updates if signed in.
-      // Note: In TG Mini Apps with Anonymous Auth, we can't strictly match userId to auth.uid 
-      // if using TG ID as the key, so we rely on isSignedIn() + validation.
       allow update: if isSignedIn() && isValidUser(request.resource.data) &&
-                      request.resource.data.createdAt == resource.data.createdAt &&
                       request.resource.data.updatedAt == request.time &&
                       (
-                        // Action: Tap progress (Limit increase to prevent cheating)
+                        // Action: Progress Update (Owner syncing or tapping)
                         (request.resource.data.balance >= resource.data.balance && 
-                         request.resource.data.balance <= resource.data.balance + 100 && 
                          request.resource.data.referralCount == resource.data.referralCount &&
                          request.resource.data.diff(resource.data).affectedKeys().hasAny(['balance', 'updatedAt', 'username'])) ||
                          
-                        // Action: Referral Reward (System/Other user granting bonus)
-                        (request.resource.data.balance == resource.data.balance + 100 &&
+                        // Action: Referral Reward (System or peer granting bonus)
+                        (request.resource.data.balance == resource.data.balance + 50 &&
                          request.resource.data.referralCount == resource.data.referralCount + 1 &&
                          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'referralCount', 'updatedAt']))
                       );
