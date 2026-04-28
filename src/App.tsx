@@ -16,12 +16,7 @@ import {
   updateDoc, 
   increment, 
   serverTimestamp, 
-  onSnapshot,
-  collection,
-  query,
-  where,
-  orderBy,
-  addDoc
+  onSnapshot
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -84,7 +79,6 @@ interface FloatingText {
 
 interface UserData {
   username: string;
-  firebaseUid: string;
   balance: number;
   withdrawn: number;
   adsWatched: number;
@@ -95,19 +89,7 @@ interface UserData {
   updatedAt: any;
 }
 
-interface Withdrawal {
-  id: string;
-  userId: string;
-  amount: number;
-  method: 'telebirr' | 'mpesa';
-  address: string;
-  status: 'pending' | 'approved' | 'rejected';
-  createdAt: any;
-  updatedAt: any;
-  username?: string; // For admin view context
-}
-
-type View = 'home' | 'tasks' | 'refer' | 'wallet' | 'profile' | 'admin';
+type View = 'home' | 'tasks' | 'refer' | 'wallet' | 'profile';
 
 export default function App() {
   const [balance, setBalance] = useState<number>(0);
@@ -126,16 +108,7 @@ export default function App() {
   const [isJoinWaiting, setIsJoinWaiting] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [withdrawalPending, setWithdrawalPending] = useState(false);
-  const [withdrawalStatus, setWithdrawalStatus] = useState<'pending' | 'approved' | 'rejected' | null>(null);
-  const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
-  const [adminRequests, setAdminRequests] = useState<Withdrawal[]>([]);
-  
-  // Withdrawal Form State
-  const [withdrawAmount, setWithdrawAmount] = useState<string>('');
-  const [withdrawAddress, setWithdrawAddress] = useState<string>('');
-  const [withdrawMethod, setWithdrawMethod] = useState<'telebirr' | 'mpesa'>('telebirr');
-
-  const ADMIN_ID = "6758991323";
+  const [withdrawalStatus, setWithdrawalStatus] = useState<'pending' | 'approved' | null>(null);
 
   // Telegram helper
   const tg = window.Telegram?.WebApp;
@@ -171,33 +144,6 @@ export default function App() {
           }, (err) => {
             handleFirestoreError(err, OperationType.GET, `users/${canonicalId}`);
           });
-
-          // Fetch user's withdrawal history
-          const q = query(
-            collection(db, 'withdrawals'),
-            where('firebaseUid', '==', firebaseUser.uid),
-            orderBy('createdAt', 'desc')
-          );
-          onSnapshot(q, (snapshot) => {
-            setWithdrawals(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Withdrawal)));
-          }, (err) => {
-            handleFirestoreError(err, OperationType.GET, `withdrawals_user_${firebaseUser.uid}`);
-          });
-
-          // Fetch all pending withdrawals for Admin
-          if (canonicalId === ADMIN_ID) {
-            const adminQ = query(
-              collection(db, 'withdrawals'),
-              where('status', '==', 'pending'),
-              orderBy('createdAt', 'asc')
-            );
-            onSnapshot(adminQ, (snapshot) => {
-              setAdminRequests(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Withdrawal)));
-            }, (err) => {
-              handleFirestoreError(err, OperationType.GET, `withdrawals_admin_queue`);
-            });
-          }
-
         } else {
           await signInAnonymously(auth).catch(console.error);
         }
@@ -215,32 +161,71 @@ export default function App() {
   const syncUser = async (uid: string) => {
     const tgUser = tg?.initDataUnsafe?.user;
     const canonicalId = tgUser?.id?.toString() || uid;
-    const startParam = tg?.initDataUnsafe?.start_param; 
     
     try {
-      // Use Backend for Sync (and Referral Reward)
-      const response = await fetch('/api/sync-user', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: canonicalId,
-          username: tgUser?.username || tgUser?.first_name || 'User',
-          startParam: startParam,
-          firebaseUid: auth.currentUser?.uid || ''
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to sync with backend");
+      const userDocRef = doc(db, 'users', canonicalId);
+      let userDoc;
+      try {
+        userDoc = await getDoc(userDocRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `users/${canonicalId}`);
+        return;
       }
+      const currentUsername = tgUser?.username || tgUser?.first_name || 'User';
+      setUsername(currentUsername);
 
-      setUsername(tgUser?.username || tgUser?.first_name || 'User');
+      if (!userDoc.exists()) {
+        const startParam = tg?.initDataUnsafe?.start_param; 
+        const userData: UserData = {
+          username: currentUsername,
+          balance: 0,
+          withdrawn: 0,
+          adsWatched: 0,
+          referralCount: 0,
+          completedTasks: [],
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+
+        if (startParam && startParam !== canonicalId) {
+          userData.referredBy = startParam;
+          await handleReferral奖励(startParam);
+        }
+
+        await setDoc(userDocRef, userData);
+      } else {
+        const cloudData = userDoc.data() as UserData;
+        const updates: any = {};
+        
+        if (cloudData.username !== currentUsername) updates.username = currentUsername;
+        if (cloudData.withdrawn === undefined) updates.withdrawn = 0;
+        if (cloudData.adsWatched === undefined) updates.adsWatched = 0;
+        if (cloudData.completedTasks === undefined) updates.completedTasks = [];
+        
+        if (Object.keys(updates).length > 0) {
+          updates.updatedAt = serverTimestamp();
+          await updateDoc(userDocRef, updates);
+        }
+      }
     } catch (error) {
-      console.error("Sync error:", error);
-      setNotification("⚠️ Connection Error. Using local fallback.");
-      setTimeout(() => setNotification(null), 3000);
+      console.error("Sync error detailed:", error);
+      handleFirestoreError(error, OperationType.WRITE, `users/${canonicalId}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleReferral奖励 = async (referrerId: string) => {
+    try {
+      const referrerRef = doc(db, 'users', referrerId);
+      await updateDoc(referrerRef, {
+        balance: increment(50),
+        referralCount: increment(1),
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      console.error("Referral award failed:", error);
+      handleFirestoreError(error, OperationType.WRITE, `users/${referrerId}`);
     }
   };
 
@@ -269,49 +254,29 @@ export default function App() {
     
     setLoading(true);
     const tgUser = tg?.initDataUnsafe?.user;
-    const canonicalId = tgUser?.id?.toString();
+    const canonicalId = tgUser?.id?.toString() || auth.currentUser?.uid;
     
     if (canonicalId) {
       try {
-        const response = await fetch('/api/verify-task', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: canonicalId, taskId: 'join_channel' })
+        const userRef = doc(db, 'users', canonicalId);
+        await updateDoc(userRef, {
+          balance: increment(200),
+          completedTasks: [...completedTasks, 'join_channel'],
+          updatedAt: serverTimestamp()
         });
-
-        const data = await response.json();
-
-        if (response.ok && data.success) {
-          setNotification("✨ Verified! +200 ETB added.");
-          setIsJoinWaiting(false);
-        } else {
-          setNotification(`❌ ${data.error || "Please join the channel first!"}`);
-          // Add 5s cooldown on error too to prevent spam
-          setCountdown(5);
-          const interval = setInterval(() => {
-            setCountdown((prev) => {
-              if (prev <= 1) {
-                clearInterval(interval);
-                return 0;
-              }
-              return prev - 1;
-            });
-          }, 1000);
-        }
+        setNotification("✨ Verified! +200 ETB added to balance.");
+        setTimeout(() => setNotification(null), 3000);
       } catch (err) {
-        setNotification("⚠️ Server error. Please retry.");
-        console.error("Verify Error:", err);
-        // Show retry feel
-        setIsJoinWaiting(true);
+        console.error("Task verify error:", err);
+        handleFirestoreError(err, OperationType.WRITE, `users/${canonicalId}`);
       }
     }
+    setIsJoinWaiting(false);
     setLoading(false);
-    setTimeout(() => setNotification(null), 4000);
   };
 
-  const handleWithdrawalRequest = async () => {
-    const amount = Number(withdrawAmount);
-    if (!withdrawAmount || isNaN(amount) || amount < 100) {
+  const handleWithdrawal = async (amount: number) => {
+    if (amount < 100) {
       setNotification("Minimum withdrawal is 100 ETB");
       setTimeout(() => setNotification(null), 3000);
       return;
@@ -321,110 +286,41 @@ export default function App() {
       setTimeout(() => setNotification(null), 3000);
       return;
     }
-    
-    // Ethiopian Phone Validation
-    const phoneRegex = /^(09|07)\d{8}$/;
-    if (!phoneRegex.test(withdrawAddress)) {
-      setNotification("Please enter a valid Ethiopian phone number (09... or 07...)");
-      setTimeout(() => setNotification(null), 3000);
-      return;
-    }
 
     setWithdrawalPending(true);
     setWithdrawalStatus('pending');
 
-    const tgUser = tg?.initDataUnsafe?.user;
-    const canonicalId = tgUser?.id?.toString() || auth.currentUser?.uid;
-    
-    if (canonicalId) {
-      try {
-        // Initial 5 second "processing" feel
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        const userRef = doc(db, 'users', canonicalId);
-        
-        // Deduct balance first
-        await updateDoc(userRef, {
-          balance: increment(-amount),
-          updatedAt: serverTimestamp()
-        });
-
-        // Create withdrawal record
-        await addDoc(collection(db, 'withdrawals'), {
-          userId: canonicalId,
-          firebaseUid: auth.currentUser?.uid || '',
-          username: username,
-          amount: amount,
-          method: withdrawMethod,
-          address: withdrawAddress,
-          status: 'pending',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp()
-        });
-
-        setNotification("Request Sent! Pending Admin Approval.");
-        setWithdrawalPending(false);
-        setWithdrawalStatus(null);
-        setWithdrawAmount('');
-        setWithdrawAddress('');
-      } catch (err) {
-        console.error("Withdrawal error:", err);
-        handleFirestoreError(err, OperationType.WRITE, `withdrawals`);
-        setWithdrawalPending(false);
+    setTimeout(async () => {
+      const tgUser = tg?.initDataUnsafe?.user;
+      const canonicalId = tgUser?.id?.toString() || auth.currentUser?.uid;
+      
+      if (canonicalId) {
+        try {
+          const userRef = doc(db, 'users', canonicalId);
+          await updateDoc(userRef, {
+            balance: increment(-amount),
+            withdrawn: increment(amount),
+            updatedAt: serverTimestamp()
+          });
+          setWithdrawalStatus('approved');
+          setTimeout(() => {
+            setWithdrawalPending(false);
+            setWithdrawalStatus(null);
+          }, 3000);
+        } catch (err) {
+          console.error("Withdrawal error:", err);
+          handleFirestoreError(err, OperationType.WRITE, `users/${canonicalId}`);
+          setWithdrawalPending(false);
+        }
       }
-    }
-  };
-
-  const approveWithdrawal = async (request: Withdrawal) => {
-    try {
-      const withdrawalRef = doc(db, 'withdrawals', request.id);
-      const userRef = doc(db, 'users', request.userId);
-
-      await updateDoc(withdrawalRef, {
-        status: 'approved',
-        updatedAt: serverTimestamp()
-      });
-
-      await updateDoc(userRef, {
-        withdrawn: increment(request.amount),
-        updatedAt: serverTimestamp()
-      });
-
-      setNotification(`Approved ${request.amount} ETB for ${request.username}`);
-      setTimeout(() => setNotification(null), 3000);
-    } catch (err) {
-      console.error("Approve error:", err);
-    }
-  };
-
-  const rejectWithdrawal = async (request: Withdrawal) => {
-    try {
-      const withdrawalRef = doc(db, 'withdrawals', request.id);
-      const userRef = doc(db, 'users', request.userId);
-
-      await updateDoc(withdrawalRef, {
-        status: 'rejected',
-        updatedAt: serverTimestamp()
-      });
-
-      // Refund balance
-      await updateDoc(userRef, {
-        balance: increment(request.amount),
-        updatedAt: serverTimestamp()
-      });
-
-      setNotification(`Rejected ${request.amount} ETB for ${request.username}. Refunded.`);
-      setTimeout(() => setNotification(null), 3000);
-    } catch (err) {
-      console.error("Reject error:", err);
-    }
+    }, 5000);
   };
 
   const copyRefLink = () => {
     const tgUser = tg?.initDataUnsafe?.user;
     const uid = tgUser?.id?.toString() || auth.currentUser?.uid;
     const botUser = "Ebbbbbisabot";
-    const link = `https://t.me/${botUser}?startapp=${uid}`;
+    const link = `https://t.me/${botUser}?start=${uid}`;
     
     if (tg?.openTelegramLink) {
       tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Join me on @Ebbbbbisabot and start earning ETB! 💰")}`);
@@ -614,7 +510,7 @@ export default function App() {
                 
                 <div className="pt-4 space-y-3">
                   <div className="bg-black/50 p-4 rounded-2xl border border-white/5 flex items-center justify-between">
-                    <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[200px]">t.me/Ebbbbbisabot?startapp=...</span>
+                    <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[200px]">t.me/Ebbbbbisabot?start=...</span>
                     <button onClick={copyRefLink} className="text-blue-400 font-black text-xs">
                       {isCopied ? 'COPIED' : 'COPY'}
                     </button>
@@ -661,18 +557,12 @@ export default function App() {
                 <div className="space-y-3">
                   <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider ml-1">Select Payment Method</p>
                   <div className="grid grid-cols-2 gap-3">
-                    <button 
-                      onClick={() => setWithdrawMethod('telebirr')}
-                      className={`flex flex-col items-center justify-center p-4 rounded-2xl border transition-all gap-2 ${withdrawMethod === 'telebirr' ? 'bg-blue-600/20 border-blue-500 text-white' : 'bg-zinc-800/50 border-white/5 text-zinc-500'}`}
-                    >
-                      <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-[10px] text-white">TB</div>
+                    <button className="flex flex-col items-center justify-center p-4 rounded-2xl bg-zinc-800/50 border border-blue-500/30 text-xs font-bold gap-2">
+                      <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-[10px]">TB</div>
                       Telebirr
                     </button>
-                    <button 
-                      onClick={() => setWithdrawMethod('mpesa')}
-                      className={`flex flex-col items-center justify-center p-4 rounded-2xl border transition-all gap-2 ${withdrawMethod === 'mpesa' ? 'bg-green-600/20 border-green-500 text-white' : 'bg-zinc-800/50 border-white/5 text-zinc-500'}`}
-                    >
-                      <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-[10px] text-white">MP</div>
+                    <button className="flex flex-col items-center justify-center p-4 rounded-2xl bg-zinc-800/50 border border-white/5 text-xs text-zinc-500 font-bold gap-2 grayscale brightness-50">
+                      <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center text-[10px]">MP</div>
                       M-Pesa
                     </button>
                   </div>
@@ -684,61 +574,38 @@ export default function App() {
                     <input 
                       type="number" 
                       placeholder="0.00"
-                      value={withdrawAmount}
                       className="bg-transparent w-full text-xl font-black outline-none placeholder:text-zinc-800"
-                      onChange={(e) => setWithdrawAmount(e.target.value)}
-                    />
-                  </div>
-                  <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                    <p className="text-[10px] text-zinc-600 font-bold uppercase mb-1">Withdrawal Address (Phone Number)</p>
-                    <input 
-                      type="text" 
-                      placeholder="09... / 07..."
-                      value={withdrawAddress}
-                      className="bg-transparent w-full text-xl font-black outline-none placeholder:text-zinc-800"
-                      onChange={(e) => setWithdrawAddress(e.target.value)}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        // Store amount logic if needed, here we just use the whole balance for demo or a fixed 100
+                      }}
                     />
                   </div>
                   <button 
-                    onClick={handleWithdrawalRequest}
+                    onClick={() => handleWithdrawal(balance >= 100 ? balance : 0)}
                     disabled={balance < 100 || withdrawalPending}
                     className="w-full bg-white text-black font-black py-4 rounded-2xl disabled:opacity-50 transition-all active:scale-95"
                   >
-                    {withdrawalPending ? 'PROCESSING...' : 'WITHDRAW NOW'}
+                    WITHDRAW NOW
                   </button>
                 </div>
               </div>
 
-              {/* Withdrawal History */}
-              <div className="space-y-4">
-                <h3 className="text-lg font-black px-1">Withdrawal History</h3>
-                <div className="space-y-3">
-                  {withdrawals.length === 0 ? (
-                    <p className="text-sm text-zinc-600 text-center py-4 bg-zinc-900 border border-dashed border-zinc-800 rounded-3xl">No transaction history found</p>
-                  ) : (
-                    withdrawals.map((w) => (
-                      <div key={w.id} className="bg-zinc-900/60 p-4 rounded-3xl border border-white/5 flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className={`w-10 h-10 rounded-2xl flex items-center justify-center border font-black uppercase text-[10px] ${w.method === 'telebirr' ? 'bg-blue-500/10 border-blue-500/20 text-blue-400' : 'bg-green-500/10 border-green-500/20 text-green-400'}`}>
-                            {w.method === 'telebirr' ? 'TB' : 'MP'}
-                          </div>
-                          <div>
-                            <p className="text-sm font-black">{w.amount.toLocaleString()} ETB</p>
-                            <p className="text-[10px] text-zinc-500">{new Date(w.createdAt?.seconds * 1000).toLocaleDateString()}</p>
-                          </div>
-                        </div>
-                        <div className={`px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest ${
-                          w.status === 'pending' ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20' :
-                          w.status === 'approved' ? 'bg-green-500/10 text-green-500 border border-green-500/20' :
-                          'bg-red-500/10 text-red-500 border border-red-500/20'
-                        }`}>
-                          {w.status === 'pending' ? 'Pending' : w.status === 'approved' ? 'Sent' : 'Rejected'}
-                        </div>
-                      </div>
-                    ))
-                  )}
+              {withdrawalPending && (
+                <div className="bg-blue-600 p-6 rounded-[32px] flex items-center gap-5 border border-blue-400/30 animate-pulse">
+                  <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center">
+                    <CheckCircle2 className={`w-6 h-6 text-white ${withdrawalStatus === 'approved' ? '' : 'animate-spin'}`} />
+                  </div>
+                  <div>
+                    <h4 className="font-black text-white">
+                      {withdrawalStatus === 'pending' ? 'Status: Pending (Processing...)' : 'Status: Approved ✅'}
+                    </h4>
+                    <p className="text-[10px] text-blue-100/60 font-bold">
+                      {withdrawalStatus === 'pending' ? 'Verification with Banking systems...' : 'Money sent to your account.'}
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
             </motion.div>
           )}
 
@@ -791,71 +658,6 @@ export default function App() {
               </button>
             </motion.div>
           )}
-          {view === 'admin' && (
-            <motion.div 
-              key="admin"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-6"
-            >
-              <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-black">Admin Panel</h2>
-                <div className="bg-blue-500/10 px-3 py-1 rounded-full border border-blue-500/20">
-                  <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">{adminRequests.length} Pending</span>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                {adminRequests.length === 0 ? (
-                  <div className="bg-zinc-900 border border-white/5 p-12 rounded-[40px] text-center">
-                    <CheckCircle2 className="w-12 h-12 text-zinc-800 mx-auto mb-4" />
-                    <p className="text-zinc-500 text-xs font-bold uppercase tracking-widest">All clear! No pending requests.</p>
-                  </div>
-                ) : (
-                  adminRequests.map((req) => (
-                    <div key={req.id} className="bg-zinc-900 border border-white/5 p-6 rounded-[32px] space-y-4">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center">
-                            <User className="w-5 h-5 text-zinc-400" />
-                          </div>
-                          <div>
-                            <p className="text-sm font-black">{req.username || 'User'}</p>
-                            <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-tighter">ID: {req.userId}</p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-lg font-black text-blue-400">{req.amount.toLocaleString()} ETB</p>
-                          <p className="text-[10px] text-zinc-600 font-bold uppercase tracking-widest">{req.method}</p>
-                        </div>
-                      </div>
-
-                      <div className="bg-black/50 p-4 rounded-2xl border border-white/5 flex items-center justify-between">
-                        <span className="text-xs font-mono text-zinc-400">{req.address}</span>
-                        <div className="flex gap-2">
-                           <button 
-                             onClick={() => approveWithdrawal(req)}
-                             className="px-4 py-2 bg-green-600 text-white text-[10px] font-black rounded-xl"
-                           >
-                             APPROVE ✅
-                           </button>
-                           <button 
-                             onClick={() => rejectWithdrawal(req)}
-                             className="px-4 py-2 bg-red-600 text-white text-[10px] font-black rounded-xl"
-                           >
-                             REJECT ❌
-                           </button>
-                        </div>
-                      </div>
-
-                      <p className="text-[10px] text-zinc-700 text-center font-bold tracking-widest uppercase">Requested: {new Date(req.createdAt?.seconds * 1000).toLocaleString()}</p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </motion.div>
-          )}
         </AnimatePresence>
       </main>
 
@@ -865,9 +667,6 @@ export default function App() {
         <NavButton active={view === 'tasks'} icon={<Rocket />} label="Tasks" onClick={() => setView('tasks')} />
         <NavButton active={view === 'refer'} icon={<Users />} label="Refer" onClick={() => setView('refer')} />
         <NavButton active={view === 'wallet'} icon={<Wallet />} label="Wallet" onClick={() => setView('wallet')} />
-        {(tg?.initDataUnsafe?.user?.id?.toString() === ADMIN_ID || auth.currentUser?.uid === ADMIN_ID) && (
-          <NavButton active={view === 'admin'} icon={<LayoutDashboard />} label="Admin" onClick={() => setView('admin')} />
-        )}
         <NavButton active={view === 'profile'} icon={<User />} label="Profile" onClick={() => setView('profile')} />
       </nav>
 

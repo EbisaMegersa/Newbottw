@@ -1,25 +1,11 @@
 {
   "entities": {
-    "Log": {
-      "title": "Log",
-      "description": "System error log data",
-      "type": "object",
-      "properties": {
-        "level": { "type": "string" },
-        "context": { "type": "string" },
-        "message": { "type": "string" },
-        "timestamp": { "type": "string", "format": "date-time" },
-        "adminNotified": { "type": "boolean" }
-      },
-      "required": ["level", "context", "message", "timestamp"]
-    },
     "User": {
       "title": "User",
       "description": "Stores user progress and referral data",
       "type": "object",
       "properties": {
         "username": { "type": "string" },
-        "firebaseUid": { "type": "string", "description": "The Firebase Auth UID for security rules" },
         "balance": { "type": "number", "description": "Current spendable balance" },
         "withdrawn": { "type": "number", "description": "Total amount withdrawn" },
         "adsWatched": { "type": "number", "description": "Total ads watched" },
@@ -29,37 +15,13 @@
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["username", "firebaseUid", "balance", "referralCount", "createdAt", "updatedAt"]
-    },
-    "Withdrawal": {
-      "title": "Withdrawal",
-      "description": "Withdrawal request record",
-      "type": "object",
-      "properties": {
-        "userId": { "type": "string" },
-        "firebaseUid": { "type": "string" },
-        "amount": { "type": "number" },
-        "method": { "type": "string", "enum": ["telebirr", "mpesa"] },
-        "address": { "type": "string", "description": "Phone number or account ID" },
-        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" }
-      },
-      "required": ["userId", "amount", "method", "address", "status", "createdAt", "updatedAt"]
+      "required": ["username", "balance", "referralCount", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "users/{userId}": {
       "schema": "User",
       "description": "User profile and stats"
-    },
-    "withdrawals/{withdrawalId}": {
-      "schema": "Withdrawal",
-      "description": "Global queue of withdrawal requests for admin approval"
-    },
-    "logs/{logId}": {
-      "schema": "Log",
-      "description": "System error logs for admin review"
     }
   }
 }
