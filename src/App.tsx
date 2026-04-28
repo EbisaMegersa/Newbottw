@@ -320,7 +320,7 @@ export default function App() {
     const tgUser = tg?.initDataUnsafe?.user;
     const uid = tgUser?.id?.toString() || auth.currentUser?.uid;
     const botUser = "Ebbbbbisabot";
-    const link = `https://t.me/${botUser}?start=${uid}`;
+    const link = `https://t.me/${botUser}?startapp=${uid}`;
     
     if (tg?.openTelegramLink) {
       tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Join me on @Ebbbbbisabot and start earning ETB! 💰")}`);
@@ -510,7 +510,7 @@ export default function App() {
                 
                 <div className="pt-4 space-y-3">
                   <div className="bg-black/50 p-4 rounded-2xl border border-white/5 flex items-center justify-between">
-                    <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[200px]">t.me/Ebbbbbisabot?start=...</span>
+                    <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[200px]">t.me/Ebbbbbisabot?startapp=...</span>
                     <button onClick={copyRefLink} className="text-blue-400 font-black text-xs">
                       {isCopied ? 'COPIED' : 'COPY'}
                     </button>
