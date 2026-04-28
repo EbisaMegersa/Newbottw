@@ -141,6 +141,8 @@ export default function App() {
               setAdsWatched(Number(data.adsWatched) || 0);
               setCompletedTasks(data.completedTasks || []);
             }
+          }, (err) => {
+            handleFirestoreError(err, OperationType.GET, `users/${canonicalId}`);
           });
         } else {
           await signInAnonymously(auth).catch(console.error);
@@ -162,7 +164,13 @@ export default function App() {
     
     try {
       const userDocRef = doc(db, 'users', canonicalId);
-      const userDoc = await getDoc(userDocRef);
+      let userDoc;
+      try {
+        userDoc = await getDoc(userDocRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `users/${canonicalId}`);
+        return;
+      }
       const currentUsername = tgUser?.username || tgUser?.first_name || 'User';
       setUsername(currentUsername);
 
@@ -187,12 +195,21 @@ export default function App() {
         await setDoc(userDocRef, userData);
       } else {
         const cloudData = userDoc.data() as UserData;
-        if (cloudData.username !== currentUsername) {
-          await updateDoc(userDocRef, { username: currentUsername, updatedAt: serverTimestamp() });
+        const updates: any = {};
+        
+        if (cloudData.username !== currentUsername) updates.username = currentUsername;
+        if (cloudData.withdrawn === undefined) updates.withdrawn = 0;
+        if (cloudData.adsWatched === undefined) updates.adsWatched = 0;
+        if (cloudData.completedTasks === undefined) updates.completedTasks = [];
+        
+        if (Object.keys(updates).length > 0) {
+          updates.updatedAt = serverTimestamp();
+          await updateDoc(userDocRef, updates);
         }
       }
     } catch (error) {
-      console.error("Sync error:", error);
+      console.error("Sync error detailed:", error);
+      handleFirestoreError(error, OperationType.WRITE, `users/${canonicalId}`);
     } finally {
       setLoading(false);
     }
@@ -208,6 +225,7 @@ export default function App() {
       });
     } catch (error) {
       console.error("Referral award failed:", error);
+      handleFirestoreError(error, OperationType.WRITE, `users/${referrerId}`);
     }
   };
 
@@ -250,6 +268,7 @@ export default function App() {
         setTimeout(() => setNotification(null), 3000);
       } catch (err) {
         console.error("Task verify error:", err);
+        handleFirestoreError(err, OperationType.WRITE, `users/${canonicalId}`);
       }
     }
     setIsJoinWaiting(false);
@@ -290,6 +309,7 @@ export default function App() {
           }, 3000);
         } catch (err) {
           console.error("Withdrawal error:", err);
+          handleFirestoreError(err, OperationType.WRITE, `users/${canonicalId}`);
           setWithdrawalPending(false);
         }
       }
@@ -300,7 +320,7 @@ export default function App() {
     const tgUser = tg?.initDataUnsafe?.user;
     const uid = tgUser?.id?.toString() || auth.currentUser?.uid;
     const botUser = "Ebbbbbisabot";
-    const link = `https://t.me/${botUser}?start=${uid}`;
+    const link = `https://t.me/${botUser}?startapp=${uid}`;
     
     if (tg?.openTelegramLink) {
       tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Join me on @Ebbbbbisabot and start earning ETB! 💰")}`);
@@ -490,7 +510,7 @@ export default function App() {
                 
                 <div className="pt-4 space-y-3">
                   <div className="bg-black/50 p-4 rounded-2xl border border-white/5 flex items-center justify-between">
-                    <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[200px]">t.me/Ebbbbbisabot?start=...</span>
+                    <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[200px]">t.me/Ebbbbbisabot?startapp=...</span>
                     <button onClick={copyRefLink} className="text-blue-400 font-black text-xs">
                       {isCopied ? 'COPIED' : 'COPY'}
                     </button>

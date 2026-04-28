@@ -20,9 +20,9 @@ service cloud.firestore {
       return data.username is string && 
              data.balance is number && 
              data.referralCount is number &&
-             data.withdrawn is number &&
-             data.adsWatched is number &&
-             data.completedTasks is list &&
+             (!('withdrawn' in data) || data.withdrawn is number) &&
+             (!('adsWatched' in data) || data.adsWatched is number) &&
+             (!('completedTasks' in data) || data.completedTasks is list) &&
              (!('referredBy' in data) || data.referredBy is string);
     }
 
