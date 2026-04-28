@@ -10,7 +10,7 @@
 @layer base {
   body {
     @apply bg-black text-white antialiased overflow-hidden;
-    background: radial-gradient(circle at top center, #16FF16 0%, #FF0606 100%);
+    background: radial-gradient(circle at top center, #1a4d1a 0%, #000000 100%);
   }
 }
 

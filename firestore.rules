@@ -20,6 +20,9 @@ service cloud.firestore {
       return data.username is string && 
              data.balance is number && 
              data.referralCount is number &&
+             data.withdrawn is number &&
+             data.adsWatched is number &&
+             data.completedTasks is list &&
              (!('referredBy' in data) || data.referredBy is string);
     }
 
@@ -27,20 +30,28 @@ service cloud.firestore {
       allow get: if isSignedIn();
       
       allow create: if isSignedIn() && isValidUser(request.resource.data) &&
+                      request.resource.data.balance >= 0 &&
+                      request.resource.data.withdrawn == 0 &&
+                      request.resource.data.completedTasks.size() == 0 &&
                       request.resource.data.createdAt == request.time;
       
       allow update: if isSignedIn() && isValidUser(request.resource.data) &&
                       request.resource.data.updatedAt == request.time &&
                       (
-                        // Action: Progress Update (Owner syncing or tapping)
+                        // Action: Task Progression / Sync / Tap
                         (request.resource.data.balance >= resource.data.balance && 
-                         request.resource.data.referralCount == resource.data.referralCount &&
-                         request.resource.data.diff(resource.data).affectedKeys().hasAny(['balance', 'updatedAt', 'username'])) ||
+                         request.resource.data.diff(resource.data).affectedKeys().hasAny(['balance', 'updatedAt', 'username', 'completedTasks', 'adsWatched'])) ||
                          
-                        // Action: Referral Reward (System or peer granting bonus)
+                        // Action: Referral Reward
                         (request.resource.data.balance == resource.data.balance + 50 &&
                          request.resource.data.referralCount == resource.data.referralCount + 1 &&
-                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'referralCount', 'updatedAt']))
+                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'referralCount', 'updatedAt'])) ||
+
+                        // Action: Withdrawal (Balance moves to withdrawn)
+                        (request.resource.data.balance < resource.data.balance &&
+                         request.resource.data.withdrawn > resource.data.withdrawn &&
+                         request.resource.data.balance + (request.resource.data.withdrawn - resource.data.withdrawn) == resource.data.balance + resource.data.withdrawn &&
+                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'withdrawn', 'updatedAt']))
                       );
     }
   }
